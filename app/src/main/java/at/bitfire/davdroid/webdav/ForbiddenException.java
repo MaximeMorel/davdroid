@@ -5,18 +5,15 @@
  * which accompanies this distribution, and is available at
  * http://www.gnu.org/licenses/gpl.html
  */
+
 package at.bitfire.davdroid.webdav;
 
-import org.simpleframework.xml.ElementList;
-import org.simpleframework.xml.Namespace;
-import org.simpleframework.xml.Root;
+import org.apache.http.HttpStatus;
 
-import java.util.ArrayList;
-import java.util.List;
+public class ForbiddenException extends HttpException {
+	private static final long serialVersionUID = 102282229174086113L;
 
-@Namespace(reference="DAV:")
-@Root(strict=false)
-public class DavMultistatus {
-	@ElementList(inline=true,entry="response",required=false)
-	ArrayList<DavResponse> response;
+	public ForbiddenException(String reason) {
+		super(HttpStatus.SC_FORBIDDEN, reason);
+	}
 }

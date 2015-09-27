@@ -16,7 +16,7 @@ import org.simpleframework.xml.core.Persister;
 
 import java.io.StringWriter;
 import java.net.URI;
-import java.util.LinkedList;
+import java.util.ArrayList;
 
 public class HttpPropfind extends HttpEntityEnclosingRequestBaseHC4 {
 	private static final String TAG = "davdroid.HttpPropfind";
@@ -28,7 +28,7 @@ public class HttpPropfind extends HttpEntityEnclosingRequestBaseHC4 {
 		HOME_SETS,
 		CARDDAV_COLLECTIONS,
 		CALDAV_COLLECTIONS,
-		COLLECTION_CTAG,
+		COLLECTION_PROPERTIES,
 		MEMBERS_ETAG
 	}
 
@@ -56,22 +56,25 @@ public class HttpPropfind extends HttpEntityEnclosingRequestBaseHC4 {
 			depth = 1;
 			propfind.prop.displayname = new DavProp.DisplayName();
 			propfind.prop.resourcetype = new DavProp.ResourceType();
-			propfind.prop.currentUserPrivilegeSet = new LinkedList<>();
+			propfind.prop.currentUserPrivilegeSet = new ArrayList<>();
 			propfind.prop.addressbookDescription = new DavProp.AddressbookDescription();
-			propfind.prop.supportedAddressData = new LinkedList<>();
 			break;
 		case CALDAV_COLLECTIONS:
 			depth = 1;
 			propfind.prop.displayname = new DavProp.DisplayName();
 			propfind.prop.resourcetype = new DavProp.ResourceType();
-			propfind.prop.currentUserPrivilegeSet = new LinkedList<>();
+			propfind.prop.currentUserPrivilegeSet = new ArrayList<>();
 			propfind.prop.calendarDescription = new DavProp.CalendarDescription();
 			propfind.prop.calendarColor = new DavProp.CalendarColor();
 			propfind.prop.calendarTimezone = new DavProp.CalendarTimezone();
-			propfind.prop.supportedCalendarComponentSet = new LinkedList<>();
+			propfind.prop.supportedCalendarComponentSet = new ArrayList<>();
 			break;
-		case COLLECTION_CTAG:
-			propfind.prop.getctag = new DavProp.GetCTag(); 
+		case COLLECTION_PROPERTIES:
+			propfind.prop.getctag = new DavProp.GetCTag();
+			propfind.prop.resourcetype = new DavProp.ResourceType();
+			propfind.prop.displayname = new DavProp.DisplayName();
+			propfind.prop.calendarColor = new DavProp.CalendarColor();
+			propfind.prop.supportedAddressData = new ArrayList<>();
 			break;
 		case MEMBERS_ETAG:
 			depth = 1;
