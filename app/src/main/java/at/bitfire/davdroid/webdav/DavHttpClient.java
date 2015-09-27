@@ -38,7 +38,7 @@ public class DavHttpClient {
 		// use request defaults from AndroidHttpClient
 		defaultRqConfig = RequestConfig.copy(RequestConfig.DEFAULT)
 				.setConnectTimeout(60*1000)
-				.setSocketTimeout(300*1000)
+				.setSocketTimeout(1000*1000)
 				.setStaleConnectionCheckEnabled(false)
 				.build();
 	}
