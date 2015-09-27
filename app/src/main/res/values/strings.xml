@@ -47,7 +47,7 @@
         DAVdroid JB Workaround</a>.</strong></p>
     ]]></string>
     <string name="html_main_info"><![CDATA[
-       <h1>Welcome to DAVdroid/%s!</h1>
+       <h1>Welcome to DAVdroid popux/%s!</h1>
        
        <p>DAVdroid is an Android 4+ sync adapter for CalDAV/CardDAV. To use it, just add a DAVdroid account
        for your CalDAV/CardDAV server and your contacts/events/tasks will be synchronized in both directions.
