@@ -9,20 +9,15 @@ package at.bitfire.davdroid.syncadapter;
 
 import android.accounts.Account;
 import android.app.Service;
+import android.content.AbstractThreadedSyncAdapter;
 import android.content.ContentProviderClient;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SyncResult;
+import android.os.Bundle;
 import android.os.IBinder;
-import android.util.Log;
 
-import java.net.URISyntaxException;
-import java.util.HashMap;
-import java.util.Map;
-
-import at.bitfire.davdroid.resource.CardDavAddressBook;
-import at.bitfire.davdroid.resource.LocalAddressBook;
-import at.bitfire.davdroid.resource.LocalCollection;
-import at.bitfire.davdroid.resource.WebDavCollection;
+import at.bitfire.davdroid.Constants;
 
 public class ContactsSyncAdapterService extends Service {
 	private static ContactsSyncAdapter syncAdapter;
@@ -35,7 +30,6 @@ public class ContactsSyncAdapterService extends Service {
 
 	@Override
 	public void onDestroy() {
-		syncAdapter.close();
 		syncAdapter = null;
 	}
 
@@ -45,37 +39,22 @@ public class ContactsSyncAdapterService extends Service {
 	}
 	
 
-	private static class ContactsSyncAdapter extends DavSyncAdapter {
-		private final static String TAG = "davdroid.ContactsSync";
+	private static class ContactsSyncAdapter extends AbstractThreadedSyncAdapter {
+        public ContactsSyncAdapter(Context context) {
+            super(context, false);
+        }
 
-		private ContactsSyncAdapter(Context context) {
-			super(context);
-		}
+        @Override
+        public void onPerformSync(Account account, Bundle extras, String authority, ContentProviderClient provider, SyncResult syncResult) {
+            Constants.log.info("Starting address book sync (" + authority + ")");
 
-		@Override
-		protected Map<LocalCollection<?>, WebDavCollection<?>> getSyncPairs(Account account, ContentProviderClient provider) {
-			AccountSettings settings = new AccountSettings(getContext(), account);
-			String	userName = settings.getUserName(),
-					password = settings.getPassword();
-			boolean preemptive = settings.getPreemptiveAuth();
+            ContactsSyncManager syncManager = new ContactsSyncManager(getContext(), account, extras, authority, provider, syncResult);
+            syncManager.performSync();
 
-			String addressBookURL = settings.getAddressBookURL();
-			if (addressBookURL == null)
-				return null;
-			
-			try {
-				LocalCollection<?> database = new LocalAddressBook(account, provider, settings);
-				WebDavCollection<?> dav = new CardDavAddressBook(settings, httpClient, addressBookURL, userName, password, preemptive);
-				
-				Map<LocalCollection<?>, WebDavCollection<?>> map = new HashMap<>();
-				map.put(database, dav);
-				
-				return map;
-			} catch (URISyntaxException ex) {
-				Log.e(TAG, "Couldn't build address book URI", ex);
-			}
-			
-			return null;
-		}
-	}
+            Constants.log.info("Address book sync complete");
+        }
+
+    }
+
+
 }

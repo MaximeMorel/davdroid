@@ -1,4 +1,4 @@
-/*
+    /*
  * Copyright © 2013 – 2015 Ricki Hirner (bitfire web engineering).
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the GNU Public License v3.0
@@ -7,210 +7,456 @@
  */
 package at.bitfire.davdroid.syncadapter;
 
-import android.content.SyncResult;
-import android.util.Log;
+    import android.accounts.Account;
+    import android.annotation.TargetApi;
+    import android.app.Notification;
+    import android.app.NotificationManager;
+    import android.app.PendingIntent;
+    import android.content.ContentResolver;
+    import android.content.Context;
+    import android.content.Intent;
+    import android.content.SyncResult;
+    import android.os.Build;
+    import android.os.Bundle;
+    import android.text.TextUtils;
 
-import java.io.IOException;
-import java.net.URISyntaxException;
-import java.util.HashSet;
-import java.util.Set;
+    import com.squareup.okhttp.HttpUrl;
+    import com.squareup.okhttp.RequestBody;
 
-import at.bitfire.davdroid.ArrayUtils;
-import at.bitfire.davdroid.resource.LocalCollection;
-import at.bitfire.davdroid.resource.LocalStorageException;
-import at.bitfire.davdroid.resource.RecordNotFoundException;
-import at.bitfire.davdroid.resource.Resource;
-import at.bitfire.davdroid.resource.WebDavCollection;
-import at.bitfire.davdroid.webdav.ConflictException;
-import at.bitfire.davdroid.webdav.DavException;
-import at.bitfire.davdroid.webdav.ForbiddenException;
-import at.bitfire.davdroid.webdav.HttpException;
-import at.bitfire.davdroid.webdav.NotFoundException;
-import at.bitfire.davdroid.webdav.PreconditionFailedException;
-import at.bitfire.davdroid.webdav.WebDavResource;
+    import org.slf4j.Logger;
 
-public class SyncManager {
-	private static final String TAG = "davdroid.SyncManager";
-	
-	private static final int MAX_MULTIGET_RESOURCES = 35;
-	
-	final protected LocalCollection<? extends Resource> local;
-	final protected WebDavCollection<? extends Resource> remote;
-	
-	
-	public SyncManager(LocalCollection<? extends Resource> local, WebDavCollection<? extends Resource> remote) {
-		this.local = local;
-		this.remote = remote;
-	}
+    import java.io.IOException;
+    import java.util.Date;
+    import java.util.HashMap;
+    import java.util.HashSet;
+    import java.util.Map;
+    import java.util.Set;
+    import java.util.UUID;
 
-	
-	public void synchronize(boolean manualSync, SyncResult syncResult) throws URISyntaxException, LocalStorageException, IOException, HttpException, DavException {
-		// PHASE 1: fetch collection properties
-		remote.getProperties();
-		final WebDavResource.Properties collectionProperties = remote.getCollection().getProperties();
-		local.updateMetaData(collectionProperties);
+    import at.bitfire.dav4android.DavResource;
+    import at.bitfire.dav4android.exception.ConflictException;
+    import at.bitfire.dav4android.exception.DavException;
+    import at.bitfire.dav4android.exception.HttpException;
+    import at.bitfire.dav4android.exception.PreconditionFailedException;
+    import at.bitfire.dav4android.exception.ServiceUnavailableException;
+    import at.bitfire.dav4android.exception.UnauthorizedException;
+    import at.bitfire.dav4android.property.GetCTag;
+    import at.bitfire.dav4android.property.GetETag;
+    import at.bitfire.davdroid.Constants;
+    import at.bitfire.davdroid.HttpClient;
+    import at.bitfire.davdroid.R;
+    import at.bitfire.davdroid.log.ExternalFileLogger;
+    import at.bitfire.davdroid.resource.LocalCollection;
+    import at.bitfire.davdroid.resource.LocalResource;
+    import at.bitfire.davdroid.ui.DebugInfoActivity;
+    import at.bitfire.davdroid.ui.settings.AccountActivity;
+    import at.bitfire.ical4android.CalendarStorageException;
+    import at.bitfire.vcard4android.ContactsStorageException;
 
-		// PHASE 2: push local changes to server
-		int	deletedRemotely = pushDeleted(),
-			addedRemotely = pushNew(),
-			updatedRemotely = pushDirty();
+abstract public class SyncManager {
 
-		// PHASE 3A: check if there's a reason to do a sync with remote (= forced sync or remote CTag changed)
-		boolean syncMembers = (deletedRemotely + addedRemotely + updatedRemotely) > 0;
-		if (manualSync) {
-			Log.i(TAG, "Full synchronization forced");
-			syncMembers = true;
-		}
-		if (!syncMembers) {
-			final String
-					currentCTag = collectionProperties.getCTag(),
-					lastCTag = local.getCTag();
-			Log.d(TAG, "Last local CTag = " + lastCTag + "; current remote CTag = " + currentCTag);
-			if (currentCTag == null || !currentCTag.equals(lastCTag))
-				syncMembers = true;
-		}
-		
-		if (!syncMembers) {
-			Log.i(TAG, "No local changes and CTags match, no need to sync");
-			return;
-		}
-		
-		// PHASE 3B: detect details of remote changes
-		Log.i(TAG, "Fetching remote resource list");
-		Set<Resource>	remotelyAdded = new HashSet<>(),
-						remotelyUpdated = new HashSet<>();
-		
-		Resource[] remoteResources = remote.getMemberETags();
-		for (Resource remoteResource : remoteResources) {
-			try {
-				Resource localResource = local.findByRemoteName(remoteResource.getName(), false);
-				if (localResource.getETag() == null || !localResource.getETag().equals(remoteResource.getETag()))
-					remotelyUpdated.add(remoteResource);
-			} catch(RecordNotFoundException e) {
-				remotelyAdded.add(remoteResource);
-			}
-		}
+    protected final int SYNC_PHASE_PREPARE = 0,
+                        SYNC_PHASE_QUERY_CAPABILITIES = 1,
+                        SYNC_PHASE_PROCESS_LOCALLY_DELETED = 2,
+                        SYNC_PHASE_PREPARE_DIRTY = 3,
+                        SYNC_PHASE_UPLOAD_DIRTY = 4,
+                        SYNC_PHASE_CHECK_SYNC_STATE = 5,
+                        SYNC_PHASE_LIST_LOCAL = 6,
+                        SYNC_PHASE_LIST_REMOTE = 7,
+                        SYNC_PHASE_COMPARE_LOCAL_REMOTE = 8,
+                        SYNC_PHASE_DOWNLOAD_REMOTE = 9,
+                        SYNC_PHASE_SAVE_SYNC_STATE = 10;
 
-		// PHASE 4: pull remote changes from server
-		syncResult.stats.numInserts = pullNew(remotelyAdded.toArray(new Resource[remotelyAdded.size()]));
-		syncResult.stats.numUpdates = pullChanged(remotelyUpdated.toArray(new Resource[remotelyUpdated.size()]));
+    protected final NotificationManager notificationManager;
+    protected final int notificationId;
 
-		Log.i(TAG, "Removing entries that are not present remotely anymore (retaining " + remoteResources.length + " entries)");
-		syncResult.stats.numDeletes = local.deleteAllExceptRemoteNames(remoteResources);
+    protected final Context context;
+    protected final Account account;
+    protected final Bundle extras;
+    protected final String authority;
+    protected final SyncResult syncResult;
 
-        syncResult.stats.numEntries = syncResult.stats.numInserts + syncResult.stats.numUpdates + syncResult.stats.numDeletes;
+    protected final AccountSettings settings;
+    protected LocalCollection localCollection;
 
-		// update collection CTag
-		Log.i(TAG, "Sync complete, fetching new CTag");
-		local.setCTag(collectionProperties.getCTag());
-	}
-	
-	
-	private int pushDeleted() throws URISyntaxException, LocalStorageException, IOException, HttpException {
-		int count = 0;
-		long[] deletedIDs = local.findDeleted();
-		
-		try {
-			Log.i(TAG, "Remotely removing " + deletedIDs.length + " deleted resource(s) (if not changed)");
-			for (long id : deletedIDs)
-				try {
-					Resource res = local.findById(id, false);
-					if (res.getName() != null)	// is this resource even present remotely?
-						try {
-							remote.delete(res);
-						} catch(NotFoundException e) {
-							Log.i(TAG, "Locally-deleted resource has already been removed from server");
-						} catch(PreconditionFailedException|ConflictException e) {
-							Log.i(TAG, "Locally-deleted resource has been changed on the server in the meanwhile");
-						}
+    protected Logger log;
 
-					local.delete(res);
-					
-					count++;
-				} catch (RecordNotFoundException e) {
-					Log.wtf(TAG, "Couldn't read locally-deleted record", e);
-				}
-		} finally {
-			local.commit();
-		}
-		return count;
-	}
-	
-	private int pushNew() throws URISyntaxException, LocalStorageException, IOException, HttpException {
-		int count = 0;
-		long[] newIDs = local.findNew();
-		Log.i(TAG, "Uploading " + newIDs.length + " new resource(s) (if not existing)");
-		try {
-			for (long id : newIDs)
-				try {
-					Resource res = local.findById(id, true);
-					String eTag = remote.add(res);
-					if (eTag != null)
-						local.updateETag(res, eTag);
-					local.clearDirty(res);
-					count++;
-				} catch (ConflictException|PreconditionFailedException e) {
-                    Log.i(TAG, "Didn't overwrite existing resource with other content");
-				} catch (RecordNotFoundException e) {
-					Log.wtf(TAG, "Couldn't read new record", e);
-				}
-		} finally {
-			local.commit();
-		}
-		return count;
-	}
-	
-	private int pushDirty() throws URISyntaxException, LocalStorageException, IOException, HttpException {
-		int count = 0;
-		long[] dirtyIDs = local.findUpdated();
-		Log.i(TAG, "Uploading " + dirtyIDs.length + " modified resource(s) (if not changed)");
-		try {
-			for (long id : dirtyIDs) {
-				try {
-					Resource res = local.findById(id, true);
-					String eTag = remote.update(res);
-					if (eTag != null)
-						local.updateETag(res, eTag);
-					local.clearDirty(res);
-					count++;
-				} catch (ForbiddenException e) {
-					Log.w(TAG, "Server has rejected local changes, server wins", e);
-				} catch (ConflictException|PreconditionFailedException e) {
-                    Log.i(TAG, "Locally changed resource has been changed on the server in the meanwhile", e);
-				} catch (RecordNotFoundException e) {
-					Log.e(TAG, "Couldn't read dirty record", e);
-				}
-			}
-		} finally {
-			local.commit();
-		}
-		return count;
-	}
-	
-	private int pullNew(Resource[] resourcesToAdd) throws URISyntaxException, LocalStorageException, IOException, HttpException, DavException {
-		int count = 0;
-		Log.i(TAG, "Fetching " + resourcesToAdd.length + " new remote resource(s)");
-		
-		for (Resource[] resources : ArrayUtils.partition(resourcesToAdd, MAX_MULTIGET_RESOURCES))
-			for (Resource res : remote.multiGet(resources)) {
-				Log.d(TAG, "Adding " + res.getName());
-				local.add(res);
-				count++;
-			}
-		return count;
-	}
-	
-	private int pullChanged(Resource[] resourcesToUpdate) throws URISyntaxException, LocalStorageException, IOException, HttpException, DavException {
-		int count = 0;
-		Log.i(TAG, "Fetching " + resourcesToUpdate.length + " updated remote resource(s)");
-		
-		for (Resource[] resources : ArrayUtils.partition(resourcesToUpdate, MAX_MULTIGET_RESOURCES))
-			for (Resource res : remote.multiGet(resources)) {
-				Log.i(TAG, "Updating " + res.getName());
-				local.updateByRemoteName(res);
-				count++;
-			}
-		return count;
-	}
+    protected final HttpClient httpClient;
+    protected HttpUrl collectionURL;
+    protected DavResource davCollection;
+
+
+    /** remote CTag at the time of {@link #listRemote()} */
+    protected String remoteCTag = null;
+
+    /** sync-able resources in the local collection, as enumerated by {@link #listLocal()} */
+    protected Map<String, LocalResource> localResources;
+
+    /** sync-able resources in the remote collection, as enumerated by {@link #listRemote()} */
+    protected Map<String, DavResource> remoteResources;
+
+    /** resources which have changed on the server, as determined by {@link #compareLocalRemote()} */
+    protected Set<DavResource> toDownload;
+
+
+
+    public SyncManager(int notificationId, Context context, Account account, Bundle extras, String authority, SyncResult syncResult) {
+        this.context = context;
+        this.account = account;
+        this.extras = extras;
+        this.authority = authority;
+        this.syncResult = syncResult;
+
+        // required for ical4j and dav4android (ServiceLoader)
+        Thread.currentThread().setContextClassLoader(context.getClassLoader());
+
+        // get account settings and log to file (if requested)
+        settings = new AccountSettings(context, account);
+        try {
+            if (settings.logToExternalFile())
+                log = new ExternalFileLogger(context, "davdroid-SyncManager-" + account.name + "-" + authority + ".txt", settings.logVerbose());
+        } catch(IOException e) {
+            Constants.log.error("Couldn't log to external file", e);
+        }
+        if (log == null)
+            log = Constants.log;
+
+        // create HttpClient with given logger
+        httpClient = new HttpClient(log, context, settings.username(), settings.password(), settings.preemptiveAuth());
+
+        // dismiss previous error notifications
+        notificationManager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+        notificationManager.cancel(account.name, this.notificationId = notificationId);
+    }
+
+    protected abstract String getSyncErrorTitle();
+
+    @TargetApi(21)
+    public void performSync() {
+        int syncPhase = SYNC_PHASE_PREPARE;
+        try {
+            log.info("Preparing synchronization");
+            prepare();
+
+            if (Thread.interrupted())
+                return;
+            syncPhase = SYNC_PHASE_QUERY_CAPABILITIES;
+            log.info("Querying capabilities");
+            queryCapabilities();
+
+            syncPhase = SYNC_PHASE_PROCESS_LOCALLY_DELETED;
+            log.info("Processing locally deleted entries");
+            processLocallyDeleted();
+
+            if (Thread.interrupted())
+                return;
+            syncPhase = SYNC_PHASE_PREPARE_DIRTY;
+            log.info("Locally preparing dirty entries");
+            prepareDirty();
+
+            syncPhase = SYNC_PHASE_UPLOAD_DIRTY;
+            log.info("Uploading dirty entries");
+            uploadDirty();
+
+            syncPhase = SYNC_PHASE_CHECK_SYNC_STATE;
+            log.info("Checking sync state");
+            if (checkSyncState()) {
+                syncPhase = SYNC_PHASE_LIST_LOCAL;
+                log.info("Listing local entries");
+                listLocal();
+
+                if (Thread.interrupted())
+                    return;
+                syncPhase = SYNC_PHASE_LIST_REMOTE;
+                log.info("Listing remote entries");
+                listRemote();
+
+                if (Thread.interrupted())
+                    return;
+                syncPhase = SYNC_PHASE_COMPARE_LOCAL_REMOTE;
+                log.info("Comparing local/remote entries");
+                compareLocalRemote();
+
+                syncPhase = SYNC_PHASE_DOWNLOAD_REMOTE;
+                log.info("Downloading remote entries");
+                downloadRemote();
+
+                syncPhase = SYNC_PHASE_SAVE_SYNC_STATE;
+                log.info("Saving sync state");
+                saveSyncState();
+            } else
+                log.info("Remote collection didn't change, skipping remote sync");
+
+        } catch (IOException|ServiceUnavailableException e) {
+            log.error("I/O exception during sync, trying again later", e);
+            syncResult.stats.numIoExceptions++;
+
+            if (e instanceof ServiceUnavailableException) {
+                Date retryAfter = ((ServiceUnavailableException) e).retryAfter;
+                if (retryAfter != null) {
+                    // how many seconds to wait? getTime() returns ms, so divide by 1000
+                    syncResult.delayUntil = (retryAfter.getTime() - new Date().getTime()) / 1000;
+                }
+            }
+
+        } catch(Exception e) {
+            final int messageString;
+
+            if (e instanceof UnauthorizedException) {
+                log.error("Not authorized anymore", e);
+                messageString = R.string.sync_error_unauthorized;
+                syncResult.stats.numAuthExceptions++;
+            } else if (e instanceof HttpException || e instanceof DavException) {
+                log.error("HTTP/DAV Exception during sync", e);
+                messageString = R.string.sync_error_http_dav;
+                syncResult.stats.numParseExceptions++;
+            } else if (e instanceof CalendarStorageException || e instanceof ContactsStorageException) {
+                log.error("Couldn't access local storage", e);
+                messageString = R.string.sync_error_local_storage;
+                syncResult.databaseError = true;
+            } else {
+                log.error("Unknown sync error", e);
+                messageString = R.string.sync_error;
+                syncResult.stats.numParseExceptions++;
+            }
+
+            final Intent detailsIntent;
+            if (e instanceof UnauthorizedException) {
+                detailsIntent = new Intent(context, AccountActivity.class);
+                detailsIntent.putExtra(AccountActivity.EXTRA_ACCOUNT, account);
+            } else {
+                detailsIntent = new Intent(context, DebugInfoActivity.class);
+                detailsIntent.putExtra(DebugInfoActivity.KEY_EXCEPTION, e);
+                detailsIntent.putExtra(DebugInfoActivity.KEY_ACCOUNT, account);
+                detailsIntent.putExtra(DebugInfoActivity.KEY_AUTHORITY, authority);
+                detailsIntent.putExtra(DebugInfoActivity.KEY_PHASE, syncPhase);
+            }
+
+            Notification.Builder builder = new Notification.Builder(context);
+            Notification notification;
+            builder .setSmallIcon(R.drawable.ic_launcher)
+                    .setContentTitle(getSyncErrorTitle())
+                    .setContentIntent(PendingIntent.getActivity(context, notificationId, detailsIntent, PendingIntent.FLAG_UPDATE_CURRENT));
+
+            if (Build.VERSION.SDK_INT >= 20)
+                builder.setLocalOnly(true);
+
+            try {
+                String[] phases = context.getResources().getStringArray(R.array.sync_error_phases);
+                String message = context.getString(messageString, phases[syncPhase]);
+                builder.setContentText(message);
+            } catch (IndexOutOfBoundsException ex) {
+                // should never happen
+            }
+
+            if (Build.VERSION.SDK_INT >= 16) {
+                if (Build.VERSION.SDK_INT >= 21)
+                    builder.setCategory(Notification.CATEGORY_ERROR);
+                notification = builder.build();
+            } else {
+                notification = builder.getNotification();
+            }
+            notificationManager.notify(account.name, notificationId, notification);
+        } finally {
+            if (log instanceof ExternalFileLogger)
+                try {
+                    ((ExternalFileLogger)log).close();
+                } catch (IOException e) {
+                    Constants.log.error("Couldn't close external log file", e);
+                }
+        }
+    }
+
+
+    abstract protected void prepare() throws ContactsStorageException;
+
+    abstract protected void queryCapabilities() throws IOException, HttpException, DavException, CalendarStorageException, ContactsStorageException;
+
+    /**
+     * Process locally deleted entries (DELETE them on the server as well).
+     * Checks Thread.interrupted() before each request to allow quick sync cancellation.
+     */
+    protected void processLocallyDeleted() throws CalendarStorageException, ContactsStorageException {
+        // Remove locally deleted entries from server (if they have a name, i.e. if they were uploaded before),
+        // but only if they don't have changed on the server. Then finally remove them from the local address book.
+        LocalResource[] localList = localCollection.getDeleted();
+        for (LocalResource local : localList) {
+            if (Thread.interrupted())
+                return;
+
+            final String fileName = local.getFileName();
+            if (!TextUtils.isEmpty(fileName)) {
+                log.info(fileName + " has been deleted locally -> deleting from server");
+                try {
+                    new DavResource(log, httpClient, collectionURL.newBuilder().addPathSegment(fileName).build())
+                            .delete(local.getETag());
+                } catch (IOException|HttpException e) {
+                    log.warn("Couldn't delete " + fileName + " from server; ignoring (may be downloaded again)");
+                }
+            } else
+                log.info("Removing local record #" + local.getId() + " which has been deleted locally and was never uploaded");
+            local.delete();
+            syncResult.stats.numDeletes++;
+        }
+    }
+
+    protected void prepareDirty() throws CalendarStorageException, ContactsStorageException {
+        // assign file names and UIDs to new contacts so that we can use the file name as an index
+        for (LocalResource local : localCollection.getWithoutFileName()) {
+            String uuid = UUID.randomUUID().toString();
+            log.info("Found local record #" + local.getId() + " without file name; assigning file name/UID based on " + uuid);
+            local.updateFileNameAndUID(uuid);
+        }
+    }
+
+    abstract protected RequestBody prepareUpload(LocalResource resource) throws IOException, CalendarStorageException, ContactsStorageException;
+
+    /**
+     * Uploads dirty records to the server, using a PUT request for each record.
+     * Checks Thread.interrupted() before each request to allow quick sync cancellation.
+     */
+    protected void uploadDirty() throws IOException, HttpException, CalendarStorageException, ContactsStorageException {
+        // upload dirty contacts
+        for (LocalResource local : localCollection.getDirty()) {
+            if (Thread.interrupted())
+                return;
+
+            final String fileName = local.getFileName();
+
+            DavResource remote = new DavResource(log, httpClient, collectionURL.newBuilder().addPathSegment(fileName).build());
+
+            // generate entity to upload (VCard, iCal, whatever)
+            RequestBody body = prepareUpload(local);
+
+            try {
+
+                if (local.getETag() == null) {
+                    log.info("Uploading new record " + fileName);
+                    remote.put(body, null, true);
+                } else {
+                    log.info("Uploading locally modified record " + fileName);
+                    remote.put(body, local.getETag(), false);
+                }
+
+            } catch (ConflictException|PreconditionFailedException e) {
+                // we can't interact with the user to resolve the conflict, so we treat 409 like 412
+                log.info("Resource has been modified on the server before upload, ignoring", e);
+            }
+
+            String eTag = null;
+            GetETag newETag = (GetETag) remote.properties.get(GetETag.NAME);
+            if (newETag != null) {
+                eTag = newETag.eTag;
+                log.debug("Received new ETag=" + eTag + " after uploading");
+            } else
+                log.debug("Didn't receive new ETag after uploading, setting to null");
+
+            local.clearDirty(eTag);
+        }
+    }
+
+    /**
+     * Checks the current sync state (e.g. CTag) and whether synchronization from remote is required.
+     * @return <ul>
+     *      <li><code>true</code>   if the remote collection has changed, i.e. synchronization from remote is required</li>
+     *      <li><code>false</code>  if the remote collection hasn't changed</li>
+     * </ul>
+     */
+    protected boolean checkSyncState() throws CalendarStorageException, ContactsStorageException {
+        // check CTag (ignore on manual sync)
+        GetCTag getCTag = (GetCTag)davCollection.properties.get(GetCTag.NAME);
+        if (getCTag != null)
+            remoteCTag = getCTag.cTag;
+
+        String localCTag = null;
+        if (extras.containsKey(ContentResolver.SYNC_EXTRAS_MANUAL))
+            log.info("Manual sync, ignoring CTag");
+        else
+            localCTag = localCollection.getCTag();
+
+        if (remoteCTag != null && remoteCTag.equals(localCTag)) {
+            log.info("Remote collection didn't change (CTag=" + remoteCTag + "), no need to query children");
+            return false;
+        } else
+            return true;
+    }
+
+    /**
+     * Lists all local resources which should be taken into account for synchronization into {@link #localResources}.
+     */
+    protected void listLocal() throws CalendarStorageException, ContactsStorageException {
+        // fetch list of local contacts and build hash table to index file name
+        LocalResource[] localList = localCollection.getAll();
+        localResources = new HashMap<>(localList.length);
+        for (LocalResource resource : localList) {
+            log.debug("Found local resource: " + resource.getFileName());
+            localResources.put(resource.getFileName(), resource);
+        }
+    }
+
+    /**
+     * Lists all members of the remote collection which should be taken into account for synchronization into {@link #remoteResources}.
+     */
+    abstract protected void listRemote() throws IOException, HttpException, DavException;
+
+    /**
+     * Compares {@link #localResources} and {@link #remoteResources} by file name and ETag:
+     * <ul>
+     *     <li>Local resources which are not available in the remote collection (anymore) will be removed.</li>
+     *     <li>Resources whose remote ETag has changed will be added into {@link #toDownload}</li>
+     * </ul>
+     */
+    protected void compareLocalRemote() throws IOException, HttpException, DavException, CalendarStorageException, ContactsStorageException {
+        /* check which contacts
+           1. are not present anymore remotely -> delete immediately on local side
+           2. updated remotely -> add to downloadNames
+           3. added remotely  -> add to downloadNames
+         */
+        toDownload = new HashSet<>();
+        for (String localName : localResources.keySet()) {
+            DavResource remote = remoteResources.get(localName);
+            if (remote == null) {
+                log.info(localName + " is not on server anymore, deleting");
+                localResources.get(localName).delete();
+                syncResult.stats.numDeletes++;
+            } else {
+                // contact is still on server, check whether it has been updated remotely
+                GetETag getETag = (GetETag) remote.properties.get(GetETag.NAME);
+                if (getETag == null || getETag.eTag == null)
+                    throw new DavException("Server didn't provide ETag");
+                String localETag = localResources.get(localName).getETag(),
+                        remoteETag = getETag.eTag;
+                if (remoteETag.equals(localETag))
+                    syncResult.stats.numSkippedEntries++;
+                else {
+                    log.info(localName + " has been changed on server (current ETag=" + remoteETag + ", last known ETag=" + localETag + ")");
+                    toDownload.add(remote);
+                }
+
+                // remote entry has been seen, remove from list
+                remoteResources.remove(localName);
+            }
+        }
+
+        // add all unseen (= remotely added) remote contacts
+        if (!remoteResources.isEmpty()) {
+            log.info("New resources have been found on the server: " + TextUtils.join(", ", remoteResources.keySet()));
+            toDownload.addAll(remoteResources.values());
+        }
+    }
+
+    /**
+     * Downloads the remote resources in {@link #toDownload} and stores them locally.
+     * Must check Thread.interrupted() periodically to allow quick sync cancellation.
+     */
+    abstract protected void downloadRemote() throws IOException, HttpException, DavException, ContactsStorageException, CalendarStorageException;
+
+    protected void saveSyncState() throws CalendarStorageException, ContactsStorageException {
+        /* Save sync state (CTag). It doesn't matter if it has changed during the sync process
+           (for instance, because another client has uploaded changes), because this will simply
+           cause all remote entries to be listed at the next sync. */
+        log.info("Saving CTag=" + remoteCTag);
+        localCollection.setCTag(remoteCTag);
+    }
 
 }

@@ -8,10 +8,7 @@
 package at.bitfire.davdroid.resource;
 
 import java.io.Serializable;
-import java.net.MalformedURLException;
 import java.net.URI;
-import java.util.LinkedList;
-import java.util.List;
 
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
@@ -23,13 +20,12 @@ public class ServerInfo implements Serializable {
 	final private String userName, password;
 	final boolean authPreemptive;
 	
-	private String errorMessage;
+	private String logs;
 	
-	private boolean calDAV = false, cardDAV = false;
-	private List<ResourceInfo>
-		addressBooks = new LinkedList<>(),
-		calendars  = new LinkedList<>(),
-		todoLists = new LinkedList<>();
+	private ResourceInfo
+		addressBooks[] = new ResourceInfo[0],
+		calendars[] = new ResourceInfo[0],
+		taskLists[] = new ResourceInfo[0];
 	
 	
 	public boolean hasEnabledCalendars() {
@@ -39,11 +35,16 @@ public class ServerInfo implements Serializable {
 		return false;
 	}
 
+    public boolean isEmpty() {
+        return addressBooks.length == 0 && calendars.length == 0 && taskLists.length == 0;
+    }
 
-	@RequiredArgsConstructor(suppressConstructorProperties=true)
+
+    @RequiredArgsConstructor(suppressConstructorProperties=true)
 	@Data
 	public static class ResourceInfo implements Serializable {
-		public enum Type {
+
+        public enum Type {
 			ADDRESS_BOOK,
 			CALENDAR
 		}
@@ -53,41 +54,34 @@ public class ServerInfo implements Serializable {
 		final Type type;
 		final boolean readOnly;
 
-		final String URL,       // absolute URL of resource
+		final String url,       // absolute URL of resource
 			  title,
 			  description;
 		final Integer color;
 
+        /** full VTIMEZONE definition (not the TZ ID) */
 		String timezone;
 
 
 		// copy constructor
-		public ResourceInfo(ResourceInfo src) {
-			enabled = src.enabled;
-			type = src.type;
-			readOnly = src.readOnly;
 
-			URL = src.URL;
-			title = src.title;
-			description = src.description;
-			color = src.color;
+        @Override
+        public ResourceInfo clone() {
+            return new ResourceInfo(this);
+        }
 
-			timezone = src.timezone;
-		}
+        private ResourceInfo(ResourceInfo src) {
+            enabled = src.enabled;
+            type = src.type;
+            readOnly = src.readOnly;
 
+            url = src.url;
+            title = src.title;
+            description = src.description;
+            color = src.color;
 
-		// some logic
+            timezone = src.timezone;
+        }
 
-		public String getTitle() {
-			if (title == null) {
-				try {
-					java.net.URL url = new java.net.URL(URL);
-					return url.getPath();
-				} catch (MalformedURLException e) {
-					return URL;
-				}
-			} else
-				return title;
-		}
 	}
 }

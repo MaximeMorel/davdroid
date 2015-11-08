@@ -7,4 +7,8 @@
  */
 
 include ':app'
-include ':lib:httpclient-android'
+include ':dav4android'
+include ':ical4android'
+include ':vcard4android'
+
+include ':MemorizingTrustManager'

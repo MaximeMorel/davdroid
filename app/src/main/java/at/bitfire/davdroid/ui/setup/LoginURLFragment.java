@@ -9,9 +9,9 @@ package at.bitfire.davdroid.ui.setup;
 
 import android.app.DialogFragment;
 import android.app.Fragment;
-import android.app.FragmentTransaction;
 import android.os.Bundle;
 import android.text.Editable;
+import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.view.LayoutInflater;
 import android.view.Menu;
@@ -26,12 +26,12 @@ import android.widget.EditText;
 import android.widget.Spinner;
 import android.widget.TextView;
 
-import org.apache.commons.lang3.StringUtils;
-
 import java.net.URI;
 import java.net.URISyntaxException;
 
+import at.bitfire.davdroid.Constants;
 import at.bitfire.davdroid.R;
+import at.bitfire.davdroid.resource.ServerInfo;
 
 public class LoginURLFragment extends Fragment implements TextWatcher {
 	
@@ -89,20 +89,21 @@ public class LoginURLFragment extends Fragment implements TextWatcher {
 	public boolean onOptionsItemSelected(MenuItem item) {
 		switch (item.getItemId()) {
 		case R.id.next:
-			FragmentTransaction ft = getFragmentManager().beginTransaction();
-			
-			Bundle args = new Bundle();
-			try {
-				args.putString(QueryServerDialogFragment.EXTRA_BASE_URI, getBaseURI().toString());
-			} catch (URISyntaxException e) {
-			}
-			args.putString(QueryServerDialogFragment.EXTRA_USER_NAME, editUserName.getText().toString());
-			args.putString(QueryServerDialogFragment.EXTRA_PASSWORD, editPassword.getText().toString());
-			args.putBoolean(QueryServerDialogFragment.EXTRA_AUTH_PREEMPTIVE, checkboxPreemptive.isChecked());
-			
-			DialogFragment dialog = new QueryServerDialogFragment();
-			dialog.setArguments(args);
-		    dialog.show(ft, QueryServerDialogFragment.class.getName());
+            try {
+                ServerInfo serverInfo = new ServerInfo(
+                        getBaseURI(),
+                        editUserName.getText().toString(),
+                        editPassword.getText().toString(),
+                        checkboxPreemptive.isChecked()
+                );
+                Bundle args = new Bundle();
+                args.putSerializable(QueryServerDialogFragment.KEY_SERVER_INFO, serverInfo);
+                DialogFragment dialog = new QueryServerDialogFragment();
+                dialog.setArguments(args);
+                dialog.show(getFragmentManager(), null);
+            } catch(URISyntaxException e) {
+                Constants.log.debug("Invalid URI", e);
+            }
 			break;
 		default:
 			return false;
@@ -128,7 +129,7 @@ public class LoginURLFragment extends Fragment implements TextWatcher {
 				
 		// check host name
 		try {
-			if (!StringUtils.isBlank(getBaseURI().getHost()))
+			if (!TextUtils.isEmpty(getBaseURI().getHost()))
 				urlOk = true;
 		} catch (Exception e) {
 		}
