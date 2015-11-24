@@ -17,8 +17,8 @@ android {
         minSdkVersion 14
         targetSdkVersion 22
 
-        versionCode 84
-        versionName "0.9.1"
+        versionCode 86
+        versionName "0.9.1.2"
 
         buildConfigField "java.util.Date", "buildTime", "new java.util.Date()"
     }
@@ -58,7 +58,7 @@ dependencies {
     compile 'dnsjava:dnsjava:2.1.7'
     compile 'org.apache.commons:commons-lang3:3.4'
     provided 'org.projectlombok:lombok:1.16.6'
-    compile('org.slf4j:slf4j-android:1.7.12')
+    compile('org.slf4j:slf4j-android:1.7.13')
 
     compile project(':dav4android')
     compile project(':ical4android')
@@ -66,5 +66,5 @@ dependencies {
 
     compile project(':MemorizingTrustManager')
 
-    androidTestCompile 'com.squareup.okhttp:mockwebserver:2.6.0-SNAPSHOT'
+    androidTestCompile 'com.squareup.okhttp:mockwebserver:2.6.0'
 }
