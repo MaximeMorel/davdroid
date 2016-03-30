@@ -8,24 +8,38 @@
 
 package at.bitfire.davdroid;
 
+import android.support.annotation.NonNull;
+import android.text.TextUtils;
+
+import org.w3c.dom.Text;
+
+import java.util.Collections;
+import java.util.LinkedList;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-public class DavUtils {
-	public static final int calendarGreen = 0xFFC3EA6E;
+import ezvcard.util.StringUtils;
+import okhttp3.HttpUrl;
 
-	public static int CalDAVtoARGBColor(String davColor) {
-		int color = calendarGreen;		// fallback: "DAVdroid green"
-		if (davColor != null) {
-			Pattern p = Pattern.compile("#?(\\p{XDigit}{6})(\\p{XDigit}{2})?");
-			Matcher m = p.matcher(davColor);
-			if (m.find()) {
-				int color_rgb = Integer.parseInt(m.group(1), 16);
-				int color_alpha = m.group(2) != null ? (Integer.parseInt(m.group(2), 16) & 0xFF) : 0xFF;
-				color = (color_alpha << 24) | color_rgb;
-			} else
-				Constants.log.warn("Couldn't parse color " + davColor + ", using DAVdroid green");
-		}
-		return color;
-	}
+public class DavUtils {
+
+    public static String ARGBtoCalDAVColor(int colorWithAlpha) {
+        byte alpha = (byte)(colorWithAlpha >> 24);
+        int color = colorWithAlpha & 0xFFFFFF;
+        return String.format("#%06X%02X", color, alpha);
+    }
+
+    public static String lastSegmentOfUrl(@NonNull String url) {
+        // the list returned by HttpUrl.pathSegments() is unmodifiable, so we have to create a copy
+        List<String> segments = new LinkedList<>(HttpUrl.parse(url).pathSegments());
+        Collections.reverse(segments);
+
+        for (String segment : segments)
+            if (!TextUtils.isEmpty(segment))
+                return segment;
+
+        return "/";
+    }
+
 }

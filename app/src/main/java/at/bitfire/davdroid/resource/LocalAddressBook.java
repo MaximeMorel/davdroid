@@ -24,7 +24,7 @@ import android.provider.ContactsContract.RawContacts;
 import java.util.LinkedList;
 import java.util.List;
 
-import at.bitfire.davdroid.Constants;
+import at.bitfire.davdroid.App;
 import at.bitfire.vcard4android.AndroidAddressBook;
 import at.bitfire.vcard4android.AndroidContact;
 import at.bitfire.vcard4android.AndroidGroupFactory;
@@ -38,7 +38,7 @@ public class LocalAddressBook extends AndroidAddressBook implements LocalCollect
             SYNC_STATE_CTAG = "ctag",
             SYNC_STATE_URL = "url";
 
-    private Bundle syncState = new Bundle();
+    private final Bundle syncState = new Bundle();
 
 
     public LocalAddressBook(Account account, ContentProviderClient provider) {
@@ -76,6 +76,14 @@ public class LocalAddressBook extends AndroidAddressBook implements LocalCollect
     @Override
     public LocalContact[] getWithoutFileName() throws ContactsStorageException {
         return (LocalContact[])queryContacts(AndroidContact.COLUMN_FILENAME + " IS NULL", null);
+    }
+
+    public void deleteAll()  throws ContactsStorageException {
+        try {
+            provider.delete(syncAdapterURI(RawContacts.CONTENT_URI), null, null);
+        } catch (RemoteException e) {
+            throw new ContactsStorageException("Couldn't delete all local contacts", e);
+        }
     }
 
 
@@ -142,7 +150,7 @@ public class LocalAddressBook extends AndroidAddressBook implements LocalCollect
                     new String[] { GroupMembership.CONTENT_ITEM_TYPE, String.valueOf(groupId) }, null);
             while (cursor != null && cursor.moveToNext()) {
                 long id = cursor.getLong(0);
-                Constants.log.debug("Marking raw contact #" + id + " as dirty");
+                App.log.fine("Marking raw contact #" + id + " as dirty");
                 provider.update(syncAdapterURI(ContentUris.withAppendedId(RawContacts.CONTENT_URI, id)), dirty, null, null);
             }
         } catch (RemoteException e) {
@@ -157,12 +165,12 @@ public class LocalAddressBook extends AndroidAddressBook implements LocalCollect
     protected void readSyncState() throws ContactsStorageException {
         @Cleanup("recycle") Parcel parcel = Parcel.obtain();
         byte[] raw = getSyncState();
+        syncState.clear();
         if (raw != null) {
             parcel.unmarshall(raw, 0, raw.length);
             parcel.setDataPosition(0);
-            syncState = parcel.readBundle();
-        } else
-            syncState.clear();
+            syncState.putAll(parcel.readBundle());
+        }
     }
 
     @SuppressWarnings("Recycle")

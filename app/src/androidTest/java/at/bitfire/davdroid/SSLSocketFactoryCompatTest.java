@@ -9,8 +9,7 @@
 package at.bitfire.davdroid;
 
 import android.os.Build;
-
-import com.squareup.okhttp.mockwebserver.MockWebServer;
+import android.test.InstrumentationTestCase;
 
 import junit.framework.TestCase;
 
@@ -19,13 +18,18 @@ import java.net.Socket;
 
 import javax.net.ssl.SSLSocket;
 
-public class SSLSocketFactoryCompatTest extends TestCase {
+import de.duenndns.ssl.MemorizingTrustManager;
+import okhttp3.OkHttpClient;
+import okhttp3.mockwebserver.MockWebServer;
 
-    SSLSocketFactoryCompat factory = new SSLSocketFactoryCompat(null);
+public class SSLSocketFactoryCompatTest extends InstrumentationTestCase {
+
+    SSLSocketFactoryCompat factory;
     MockWebServer server = new MockWebServer();
 
     @Override
     protected void setUp() throws Exception {
+        factory = new SSLSocketFactoryCompat(new MemorizingTrustManager(getInstrumentation().getTargetContext().getApplicationContext()));
         server.start();
     }
 

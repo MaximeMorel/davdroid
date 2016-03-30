@@ -16,11 +16,6 @@ import android.os.Bundle;
 import android.provider.CalendarContract.Calendars;
 import android.text.TextUtils;
 
-import com.squareup.okhttp.HttpUrl;
-import com.squareup.okhttp.MediaType;
-import com.squareup.okhttp.RequestBody;
-import com.squareup.okhttp.ResponseBody;
-
 import org.apache.commons.codec.Charsets;
 import org.apache.commons.lang3.StringUtils;
 
@@ -28,9 +23,12 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.Charset;
+import java.util.Calendar;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.logging.Level;
 
 import at.bitfire.dav4android.DavCalendar;
 import at.bitfire.dav4android.DavResource;
@@ -42,8 +40,10 @@ import at.bitfire.dav4android.property.DisplayName;
 import at.bitfire.dav4android.property.GetCTag;
 import at.bitfire.dav4android.property.GetContentType;
 import at.bitfire.dav4android.property.GetETag;
+import at.bitfire.davdroid.App;
 import at.bitfire.davdroid.ArrayUtils;
 import at.bitfire.davdroid.Constants;
+import at.bitfire.davdroid.InvalidAccountException;
 import at.bitfire.davdroid.R;
 import at.bitfire.davdroid.resource.LocalCalendar;
 import at.bitfire.davdroid.resource.LocalEvent;
@@ -53,13 +53,17 @@ import at.bitfire.ical4android.Event;
 import at.bitfire.ical4android.InvalidCalendarException;
 import at.bitfire.vcard4android.ContactsStorageException;
 import lombok.Cleanup;
+import okhttp3.HttpUrl;
+import okhttp3.MediaType;
+import okhttp3.RequestBody;
+import okhttp3.ResponseBody;
 
 public class CalendarSyncManager extends SyncManager {
 
     protected static final int MAX_MULTIGET = 20;
 
 
-    public CalendarSyncManager(Context context, Account account, Bundle extras, String authority, SyncResult result, LocalCalendar calendar) {
+    public CalendarSyncManager(Context context, Account account, Bundle extras, String authority, SyncResult result, LocalCalendar calendar) throws InvalidAccountException {
         super(Constants.NOTIFICATION_CALENDAR_SYNC, context, account, extras, authority, result);
         localCollection = calendar;
     }
@@ -72,27 +76,12 @@ public class CalendarSyncManager extends SyncManager {
     @Override
     protected void prepare() {
         collectionURL = HttpUrl.parse(localCalendar().getName());
-        davCollection = new DavCalendar(log, httpClient, collectionURL);
+        davCollection = new DavCalendar(httpClient, collectionURL);
     }
 
     @Override
-    protected void queryCapabilities() throws DavException, IOException, HttpException, CalendarStorageException {
-        davCollection.propfind(0, DisplayName.NAME, CalendarColor.NAME, GetCTag.NAME);
-
-        // update name and color
-        log.info("Setting calendar name and color (if available)");
-        ContentValues values = new ContentValues(2);
-
-        DisplayName pDisplayName = (DisplayName)davCollection.properties.get(DisplayName.NAME);
-        if (pDisplayName != null && !TextUtils.isEmpty(pDisplayName.displayName))
-            values.put(Calendars.CALENDAR_DISPLAY_NAME, pDisplayName.displayName);
-
-        CalendarColor pColor = (CalendarColor)davCollection.properties.get(CalendarColor.NAME);
-        if (pColor != null && pColor.color != null)
-            values.put(Calendars.CALENDAR_COLOR, pColor.color);
-
-        if (values.size() > 0)
-            localCalendar().update(values);
+    protected void queryCapabilities() throws DavException, IOException, HttpException {
+        davCollection.propfind(0, GetCTag.NAME);
     }
 
     @Override
@@ -113,25 +102,35 @@ public class CalendarSyncManager extends SyncManager {
 
     @Override
     protected void listRemote() throws IOException, HttpException, DavException {
+        // calculate time range limits
+        Date limitStart = null;
+        Integer pastDays = settings.getTimeRangePastDays();
+        if (pastDays != null) {
+            Calendar calendar = Calendar.getInstance();
+            calendar.add(Calendar.DAY_OF_MONTH, -pastDays);
+            limitStart = calendar.getTime();
+        }
+
         // fetch list of remote VEVENTs and build hash table to index file name
-        davCalendar().calendarQuery("VEVENT");
+        davCalendar().calendarQuery("VEVENT", limitStart, null);
+
         remoteResources = new HashMap<>(davCollection.members.size());
         for (DavResource iCal : davCollection.members) {
             String fileName = iCal.fileName();
-            log.debug("Found remote VEVENT: " + fileName);
+            App.log.fine("Found remote VEVENT: " + fileName);
             remoteResources.put(fileName, iCal);
         }
     }
 
     @Override
     protected void downloadRemote() throws IOException, HttpException, DavException, CalendarStorageException {
-        log.info("Downloading " + toDownload.size() + " events (" + MAX_MULTIGET + " at once)");
+        App.log.info("Downloading " + toDownload.size() + " events (" + MAX_MULTIGET + " at once)");
 
         // download new/updated iCalendars from server
         for (DavResource[] bunch : ArrayUtils.partition(toDownload.toArray(new DavResource[toDownload.size()]), MAX_MULTIGET)) {
             if (Thread.interrupted())
                 return;
-            log.info("Downloading " + StringUtils.join(bunch, ", "));
+            App.log.info("Downloading " + StringUtils.join(bunch, ", "));
 
             if (bunch.length == 1) {
                 // only one contact, use GET
@@ -194,28 +193,28 @@ public class CalendarSyncManager extends SyncManager {
         try {
             events = Event.fromStream(stream, charset);
         } catch (InvalidCalendarException e) {
-            log.error("Received invalid iCalendar, ignoring");
+            App.log.log(Level.SEVERE, "Received invalid iCalendar, ignoring", e);
             return;
         }
 
-        if (events != null && events.length == 1) {
+        if (events.length == 1) {
             Event newData = events[0];
 
             // delete local event, if it exists
             LocalEvent localEvent = (LocalEvent)localResources.get(fileName);
             if (localEvent != null) {
-                log.info("Updating " + fileName + " in local calendar");
+                App.log.info("Updating " + fileName + " in local calendar");
                 localEvent.setETag(eTag);
                 localEvent.update(newData);
                 syncResult.stats.numUpdates++;
             } else {
-                log.info("Adding " + fileName + " to local calendar");
+                App.log.info("Adding " + fileName + " to local calendar");
                 localEvent = new LocalEvent(localCalendar(), newData, fileName, eTag);
                 localEvent.add();
                 syncResult.stats.numInserts++;
             }
         } else
-            log.error("Received VCALENDAR with not exactly one VEVENT with UID, but without RECURRENCE-ID; ignoring " + fileName);
+            App.log.severe("Received VCALENDAR with not exactly one VEVENT with UID, but without RECURRENCE-ID; ignoring " + fileName);
     }
 
 }

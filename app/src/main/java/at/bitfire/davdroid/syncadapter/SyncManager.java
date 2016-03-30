@@ -7,51 +7,53 @@
  */
 package at.bitfire.davdroid.syncadapter;
 
-    import android.accounts.Account;
-    import android.annotation.TargetApi;
-    import android.app.Notification;
-    import android.app.NotificationManager;
-    import android.app.PendingIntent;
-    import android.content.ContentResolver;
-    import android.content.Context;
-    import android.content.Intent;
-    import android.content.SyncResult;
-    import android.os.Build;
-    import android.os.Bundle;
-    import android.text.TextUtils;
+import android.accounts.Account;
+import android.annotation.TargetApi;
+import android.app.Notification;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.content.ContentResolver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.SyncResult;
+import android.os.Build;
+import android.os.Bundle;
+import android.support.v7.app.NotificationCompat;
+import android.text.TextUtils;
 
-    import com.squareup.okhttp.HttpUrl;
-    import com.squareup.okhttp.RequestBody;
+import java.io.IOException;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.logging.Level;
 
-    import org.slf4j.Logger;
-
-    import java.io.IOException;
-    import java.util.Date;
-    import java.util.HashMap;
-    import java.util.HashSet;
-    import java.util.Map;
-    import java.util.Set;
-    import java.util.UUID;
-
-    import at.bitfire.dav4android.DavResource;
-    import at.bitfire.dav4android.exception.ConflictException;
-    import at.bitfire.dav4android.exception.DavException;
-    import at.bitfire.dav4android.exception.HttpException;
-    import at.bitfire.dav4android.exception.PreconditionFailedException;
-    import at.bitfire.dav4android.exception.ServiceUnavailableException;
-    import at.bitfire.dav4android.exception.UnauthorizedException;
-    import at.bitfire.dav4android.property.GetCTag;
-    import at.bitfire.dav4android.property.GetETag;
-    import at.bitfire.davdroid.Constants;
-    import at.bitfire.davdroid.HttpClient;
-    import at.bitfire.davdroid.R;
-    import at.bitfire.davdroid.log.ExternalFileLogger;
-    import at.bitfire.davdroid.resource.LocalCollection;
-    import at.bitfire.davdroid.resource.LocalResource;
-    import at.bitfire.davdroid.ui.DebugInfoActivity;
-    import at.bitfire.davdroid.ui.settings.AccountActivity;
-    import at.bitfire.ical4android.CalendarStorageException;
-    import at.bitfire.vcard4android.ContactsStorageException;
+import at.bitfire.dav4android.DavResource;
+import at.bitfire.dav4android.exception.ConflictException;
+import at.bitfire.dav4android.exception.DavException;
+import at.bitfire.dav4android.exception.HttpException;
+import at.bitfire.dav4android.exception.PreconditionFailedException;
+import at.bitfire.dav4android.exception.ServiceUnavailableException;
+import at.bitfire.dav4android.exception.UnauthorizedException;
+import at.bitfire.dav4android.property.GetCTag;
+import at.bitfire.dav4android.property.GetETag;
+import at.bitfire.davdroid.AccountSettings;
+import at.bitfire.davdroid.App;
+import at.bitfire.davdroid.HttpClient;
+import at.bitfire.davdroid.InvalidAccountException;
+import at.bitfire.davdroid.R;
+import at.bitfire.davdroid.resource.LocalCollection;
+import at.bitfire.davdroid.resource.LocalResource;
+import at.bitfire.davdroid.ui.AccountActivity;
+import at.bitfire.davdroid.ui.AccountSettingsActivity;
+import at.bitfire.davdroid.ui.DebugInfoActivity;
+import at.bitfire.ical4android.CalendarStorageException;
+import at.bitfire.vcard4android.ContactsStorageException;
+import okhttp3.HttpUrl;
+import okhttp3.OkHttpClient;
+import okhttp3.RequestBody;
 
 abstract public class SyncManager {
 
@@ -79,9 +81,7 @@ abstract public class SyncManager {
     protected final AccountSettings settings;
     protected LocalCollection localCollection;
 
-    protected Logger log;
-
-    protected final HttpClient httpClient;
+    protected OkHttpClient httpClient;
     protected HttpUrl collectionURL;
     protected DavResource davCollection;
 
@@ -100,32 +100,21 @@ abstract public class SyncManager {
 
 
 
-    public SyncManager(int notificationId, Context context, Account account, Bundle extras, String authority, SyncResult syncResult) {
+    public SyncManager(int notificationId, Context context, Account account, Bundle extras, String authority, SyncResult syncResult) throws InvalidAccountException {
         this.context = context;
         this.account = account;
         this.extras = extras;
         this.authority = authority;
         this.syncResult = syncResult;
 
-        // required for ical4j and dav4android (ServiceLoader)
-        Thread.currentThread().setContextClassLoader(context.getClassLoader());
-
-        // get account settings and log to file (if requested)
+        // get account settings (for sync interval etc.)
         settings = new AccountSettings(context, account);
-        try {
-            if (settings.logToExternalFile())
-                log = new ExternalFileLogger(context, "davdroid-SyncManager-" + account.name + "-" + authority + ".txt", settings.logVerbose());
-        } catch(IOException e) {
-            Constants.log.error("Couldn't log to external file", e);
-        }
-        if (log == null)
-            log = Constants.log;
 
         // create HttpClient with given logger
-        httpClient = new HttpClient(log, context, settings.username(), settings.password(), settings.preemptiveAuth());
+        httpClient = HttpClient.create(context, account);
 
         // dismiss previous error notifications
-        notificationManager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+        notificationManager = (NotificationManager)context.getSystemService(Context.NOTIFICATION_SERVICE);
         notificationManager.cancel(account.name, this.notificationId = notificationId);
     }
 
@@ -135,60 +124,60 @@ abstract public class SyncManager {
     public void performSync() {
         int syncPhase = SYNC_PHASE_PREPARE;
         try {
-            log.info("Preparing synchronization");
+            App.log.info("Preparing synchronization");
             prepare();
 
             if (Thread.interrupted())
                 return;
             syncPhase = SYNC_PHASE_QUERY_CAPABILITIES;
-            log.info("Querying capabilities");
+            App.log.info("Querying capabilities");
             queryCapabilities();
 
             syncPhase = SYNC_PHASE_PROCESS_LOCALLY_DELETED;
-            log.info("Processing locally deleted entries");
+            App.log.info("Processing locally deleted entries");
             processLocallyDeleted();
 
             if (Thread.interrupted())
                 return;
             syncPhase = SYNC_PHASE_PREPARE_DIRTY;
-            log.info("Locally preparing dirty entries");
+            App.log.info("Locally preparing dirty entries");
             prepareDirty();
 
             syncPhase = SYNC_PHASE_UPLOAD_DIRTY;
-            log.info("Uploading dirty entries");
+            App.log.info("Uploading dirty entries");
             uploadDirty();
 
             syncPhase = SYNC_PHASE_CHECK_SYNC_STATE;
-            log.info("Checking sync state");
+            App.log.info("Checking sync state");
             if (checkSyncState()) {
                 syncPhase = SYNC_PHASE_LIST_LOCAL;
-                log.info("Listing local entries");
+                App.log.info("Listing local entries");
                 listLocal();
 
                 if (Thread.interrupted())
                     return;
                 syncPhase = SYNC_PHASE_LIST_REMOTE;
-                log.info("Listing remote entries");
+                App.log.info("Listing remote entries");
                 listRemote();
 
                 if (Thread.interrupted())
                     return;
                 syncPhase = SYNC_PHASE_COMPARE_LOCAL_REMOTE;
-                log.info("Comparing local/remote entries");
+                App.log.info("Comparing local/remote entries");
                 compareLocalRemote();
 
                 syncPhase = SYNC_PHASE_DOWNLOAD_REMOTE;
-                log.info("Downloading remote entries");
+                App.log.info("Downloading remote entries");
                 downloadRemote();
 
                 syncPhase = SYNC_PHASE_SAVE_SYNC_STATE;
-                log.info("Saving sync state");
+                App.log.info("Saving sync state");
                 saveSyncState();
             } else
-                log.info("Remote collection didn't change, skipping remote sync");
+                App.log.info("Remote collection didn't change, skipping remote sync");
 
         } catch (IOException|ServiceUnavailableException e) {
-            log.error("I/O exception during sync, trying again later", e);
+            App.log.log(Level.WARNING, "I/O exception during sync, trying again later", e);
             syncResult.stats.numIoExceptions++;
 
             if (e instanceof ServiceUnavailableException) {
@@ -199,31 +188,31 @@ abstract public class SyncManager {
                 }
             }
 
-        } catch(Exception e) {
+        } catch(Exception|OutOfMemoryError e) {
             final int messageString;
 
             if (e instanceof UnauthorizedException) {
-                log.error("Not authorized anymore", e);
+                App.log.log(Level.SEVERE, "Not authorized anymore", e);
                 messageString = R.string.sync_error_unauthorized;
                 syncResult.stats.numAuthExceptions++;
             } else if (e instanceof HttpException || e instanceof DavException) {
-                log.error("HTTP/DAV Exception during sync", e);
+                App.log.log(Level.SEVERE, "HTTP/DAV Exception during sync", e);
                 messageString = R.string.sync_error_http_dav;
                 syncResult.stats.numParseExceptions++;
             } else if (e instanceof CalendarStorageException || e instanceof ContactsStorageException) {
-                log.error("Couldn't access local storage", e);
+                App.log.log(Level.SEVERE, "Couldn't access local storage", e);
                 messageString = R.string.sync_error_local_storage;
                 syncResult.databaseError = true;
             } else {
-                log.error("Unknown sync error", e);
+                App.log.log(Level.SEVERE, "Unknown sync error", e);
                 messageString = R.string.sync_error;
                 syncResult.stats.numParseExceptions++;
             }
 
             final Intent detailsIntent;
             if (e instanceof UnauthorizedException) {
-                detailsIntent = new Intent(context, AccountActivity.class);
-                detailsIntent.putExtra(AccountActivity.EXTRA_ACCOUNT, account);
+                detailsIntent = new Intent(context, AccountSettingsActivity.class);
+                detailsIntent.putExtra(AccountSettingsActivity.EXTRA_ACCOUNT, account);
             } else {
                 detailsIntent = new Intent(context, DebugInfoActivity.class);
                 detailsIntent.putExtra(DebugInfoActivity.KEY_EXCEPTION, e);
@@ -232,14 +221,12 @@ abstract public class SyncManager {
                 detailsIntent.putExtra(DebugInfoActivity.KEY_PHASE, syncPhase);
             }
 
-            Notification.Builder builder = new Notification.Builder(context);
-            Notification notification;
+            NotificationCompat.Builder builder = new NotificationCompat.Builder(context);
             builder .setSmallIcon(R.drawable.ic_launcher)
                     .setContentTitle(getSyncErrorTitle())
-                    .setContentIntent(PendingIntent.getActivity(context, notificationId, detailsIntent, PendingIntent.FLAG_UPDATE_CURRENT));
-
-            if (Build.VERSION.SDK_INT >= 20)
-                builder.setLocalOnly(true);
+                    .setContentIntent(PendingIntent.getActivity(context, notificationId, detailsIntent, PendingIntent.FLAG_UPDATE_CURRENT))
+                    .setCategory(NotificationCompat.CATEGORY_ERROR)
+                    .setLocalOnly(true);
 
             try {
                 String[] phases = context.getResources().getStringArray(R.array.sync_error_phases);
@@ -249,21 +236,7 @@ abstract public class SyncManager {
                 // should never happen
             }
 
-            if (Build.VERSION.SDK_INT >= 16) {
-                if (Build.VERSION.SDK_INT >= 21)
-                    builder.setCategory(Notification.CATEGORY_ERROR);
-                notification = builder.build();
-            } else {
-                notification = builder.getNotification();
-            }
-            notificationManager.notify(account.name, notificationId, notification);
-        } finally {
-            if (log instanceof ExternalFileLogger)
-                try {
-                    ((ExternalFileLogger)log).close();
-                } catch (IOException e) {
-                    Constants.log.error("Couldn't close external log file", e);
-                }
+            notificationManager.notify(account.name, notificationId, builder.build());
         }
     }
 
@@ -286,15 +259,15 @@ abstract public class SyncManager {
 
             final String fileName = local.getFileName();
             if (!TextUtils.isEmpty(fileName)) {
-                log.info(fileName + " has been deleted locally -> deleting from server");
+                App.log.info(fileName + " has been deleted locally -> deleting from server");
                 try {
-                    new DavResource(log, httpClient, collectionURL.newBuilder().addPathSegment(fileName).build())
+                    new DavResource(httpClient, collectionURL.newBuilder().addPathSegment(fileName).build())
                             .delete(local.getETag());
                 } catch (IOException|HttpException e) {
-                    log.warn("Couldn't delete " + fileName + " from server; ignoring (may be downloaded again)");
+                    App.log.warning("Couldn't delete " + fileName + " from server; ignoring (may be downloaded again)");
                 }
             } else
-                log.info("Removing local record #" + local.getId() + " which has been deleted locally and was never uploaded");
+                App.log.info("Removing local record #" + local.getId() + " which has been deleted locally and was never uploaded");
             local.delete();
             syncResult.stats.numDeletes++;
         }
@@ -304,7 +277,7 @@ abstract public class SyncManager {
         // assign file names and UIDs to new contacts so that we can use the file name as an index
         for (LocalResource local : localCollection.getWithoutFileName()) {
             String uuid = UUID.randomUUID().toString();
-            log.info("Found local record #" + local.getId() + " without file name; assigning file name/UID based on " + uuid);
+            App.log.info("Found local record #" + local.getId() + " without file name; assigning file name/UID based on " + uuid);
             local.updateFileNameAndUID(uuid);
         }
     }
@@ -323,7 +296,7 @@ abstract public class SyncManager {
 
             final String fileName = local.getFileName();
 
-            DavResource remote = new DavResource(log, httpClient, collectionURL.newBuilder().addPathSegment(fileName).build());
+            DavResource remote = new DavResource(httpClient, collectionURL.newBuilder().addPathSegment(fileName).build());
 
             // generate entity to upload (VCard, iCal, whatever)
             RequestBody body = prepareUpload(local);
@@ -331,25 +304,25 @@ abstract public class SyncManager {
             try {
 
                 if (local.getETag() == null) {
-                    log.info("Uploading new record " + fileName);
+                    App.log.info("Uploading new record " + fileName);
                     remote.put(body, null, true);
                 } else {
-                    log.info("Uploading locally modified record " + fileName);
+                    App.log.info("Uploading locally modified record " + fileName);
                     remote.put(body, local.getETag(), false);
                 }
 
             } catch (ConflictException|PreconditionFailedException e) {
                 // we can't interact with the user to resolve the conflict, so we treat 409 like 412
-                log.info("Resource has been modified on the server before upload, ignoring", e);
+                App.log.log(Level.INFO, "Resource has been modified on the server before upload, ignoring", e);
             }
 
             String eTag = null;
             GetETag newETag = (GetETag) remote.properties.get(GetETag.NAME);
             if (newETag != null) {
                 eTag = newETag.eTag;
-                log.debug("Received new ETag=" + eTag + " after uploading");
+                App.log.fine("Received new ETag=" + eTag + " after uploading");
             } else
-                log.debug("Didn't receive new ETag after uploading, setting to null");
+                App.log.fine("Didn't receive new ETag after uploading, setting to null");
 
             local.clearDirty(eTag);
         }
@@ -370,12 +343,12 @@ abstract public class SyncManager {
 
         String localCTag = null;
         if (extras.containsKey(ContentResolver.SYNC_EXTRAS_MANUAL))
-            log.info("Manual sync, ignoring CTag");
+            App.log.info("Manual sync, ignoring CTag");
         else
             localCTag = localCollection.getCTag();
 
         if (remoteCTag != null && remoteCTag.equals(localCTag)) {
-            log.info("Remote collection didn't change (CTag=" + remoteCTag + "), no need to query children");
+            App.log.info("Remote collection didn't change (CTag=" + remoteCTag + "), no need to query children");
             return false;
         } else
             return true;
@@ -389,7 +362,7 @@ abstract public class SyncManager {
         LocalResource[] localList = localCollection.getAll();
         localResources = new HashMap<>(localList.length);
         for (LocalResource resource : localList) {
-            log.debug("Found local resource: " + resource.getFileName());
+            App.log.fine("Found local resource: " + resource.getFileName());
             localResources.put(resource.getFileName(), resource);
         }
     }
@@ -416,12 +389,12 @@ abstract public class SyncManager {
         for (String localName : localResources.keySet()) {
             DavResource remote = remoteResources.get(localName);
             if (remote == null) {
-                log.info(localName + " is not on server anymore, deleting");
+                App.log.info(localName + " is not on server anymore, deleting");
                 localResources.get(localName).delete();
                 syncResult.stats.numDeletes++;
             } else {
                 // contact is still on server, check whether it has been updated remotely
-                GetETag getETag = (GetETag) remote.properties.get(GetETag.NAME);
+                GetETag getETag = (GetETag)remote.properties.get(GetETag.NAME);
                 if (getETag == null || getETag.eTag == null)
                     throw new DavException("Server didn't provide ETag");
                 String localETag = localResources.get(localName).getETag(),
@@ -429,7 +402,7 @@ abstract public class SyncManager {
                 if (remoteETag.equals(localETag))
                     syncResult.stats.numSkippedEntries++;
                 else {
-                    log.info(localName + " has been changed on server (current ETag=" + remoteETag + ", last known ETag=" + localETag + ")");
+                    App.log.info(localName + " has been changed on server (current ETag=" + remoteETag + ", last known ETag=" + localETag + ")");
                     toDownload.add(remote);
                 }
 
@@ -440,7 +413,7 @@ abstract public class SyncManager {
 
         // add all unseen (= remotely added) remote contacts
         if (!remoteResources.isEmpty()) {
-            log.info("New resources have been found on the server: " + TextUtils.join(", ", remoteResources.keySet()));
+            App.log.info("New resources have been found on the server: " + TextUtils.join(", ", remoteResources.keySet()));
             toDownload.addAll(remoteResources.values());
         }
     }
@@ -455,7 +428,7 @@ abstract public class SyncManager {
         /* Save sync state (CTag). It doesn't matter if it has changed during the sync process
            (for instance, because another client has uploaded changes), because this will simply
            cause all remote entries to be listed at the next sync. */
-        log.info("Saving CTag=" + remoteCTag);
+        App.log.info("Saving CTag=" + remoteCTag);
         localCollection.setCTag(remoteCTag);
     }
 

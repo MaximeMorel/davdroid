@@ -8,137 +8,133 @@
 
 package at.bitfire.davdroid;
 
+import android.accounts.Account;
 import android.content.Context;
 import android.os.Build;
+import android.support.annotation.NonNull;
 
-import com.squareup.okhttp.Credentials;
-import com.squareup.okhttp.Interceptor;
-import com.squareup.okhttp.OkHttpClient;
-import com.squareup.okhttp.Request;
-import com.squareup.okhttp.Response;
-import com.squareup.okhttp.internal.tls.OkHostnameVerifier;
-import com.squareup.okhttp.logging.HttpLoggingInterceptor;
-
-import org.slf4j.Logger;
-
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.StringReader;
-import java.net.CookieManager;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 import at.bitfire.dav4android.BasicDigestAuthenticator;
-import de.duenndns.ssl.MemorizingTrustManager;
 import lombok.RequiredArgsConstructor;
+import okhttp3.Credentials;
+import okhttp3.Interceptor;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
+import okhttp3.logging.HttpLoggingInterceptor;
 
-public class HttpClient extends OkHttpClient {
-    private final int MAX_LOG_LINE_LENGTH = 85;
+public class HttpClient {
+    private static final OkHttpClient client = new OkHttpClient();
+    private static final UserAgentInterceptor userAgentInterceptor = new UserAgentInterceptor();
 
-    final static UserAgentInterceptor userAgentInterceptor = new UserAgentInterceptor();
-
-    static final String userAgent;
+    private static final String userAgent;
     static {
         String date = new SimpleDateFormat("yyyy/MM/dd", Locale.US).format(new Date(BuildConfig.buildTime));
-        userAgent = "DAVdroid/" + BuildConfig.VERSION_NAME + " (" + date + "; dav4android) Android/" + Build.VERSION.RELEASE;
+        userAgent = "DAVdroid/" + BuildConfig.VERSION_NAME + " (" + date + "; dav4android; okhttp3) Android/" + Build.VERSION.RELEASE;
     }
 
-    final Logger log;
-    final Context context;
-    protected String username, password;
+    private HttpClient() {
+    }
 
+    public static OkHttpClient create(@NonNull Context context, @NonNull Account account, @NonNull final Logger logger) throws InvalidAccountException {
+        OkHttpClient.Builder builder = defaultBuilder(logger);
 
-    protected HttpClient(Logger log, Context context) {
-        super();
-        this.log = (log != null) ? log : Constants.log;
-        this.context = context;
+        // use account settings for authentication and logging
+        AccountSettings settings = new AccountSettings(context, account);
 
-        if (context != null) {
-            // use MemorizingTrustManager to manage self-signed certificates
-            MemorizingTrustManager mtm = new MemorizingTrustManager(context);
-            setSslSocketFactory(new SSLSocketFactoryCompat(mtm));
-            setHostnameVerifier(mtm.wrapHostnameVerifier(OkHostnameVerifier.INSTANCE));
-        }
+        if (settings.preemptiveAuth())
+            builder.addNetworkInterceptor(new PreemptiveAuthenticationInterceptor(settings.username(), settings.password()));
+        else
+            builder.authenticator(new BasicDigestAuthenticator(null, settings.username(), settings.password()));
+
+        return builder.build();
+    }
+
+    public static OkHttpClient create(@NonNull Logger logger) {
+        return defaultBuilder(logger).build();
+    }
+
+    public static OkHttpClient create(@NonNull Context context, @NonNull Account account) throws InvalidAccountException {
+        return create(context, account, App.log);
+    }
+
+    public static OkHttpClient create() {
+        return create(App.log);
+    }
+
+    private static OkHttpClient.Builder defaultBuilder(@NonNull final Logger logger) {
+        OkHttpClient.Builder builder = client.newBuilder();
+
+        // use MemorizingTrustManager to manage self-signed certificates
+        if (App.getSslSocketFactoryCompat() != null)
+            builder.sslSocketFactory(App.getSslSocketFactoryCompat());
+        if (App.getHostnameVerifier() != null)
+            builder.hostnameVerifier(App.getHostnameVerifier());
 
         // set timeouts
-        setConnectTimeout(30, TimeUnit.SECONDS);
-        setWriteTimeout(30, TimeUnit.SECONDS);
-        setReadTimeout(120, TimeUnit.SECONDS);
+        builder.connectTimeout(60, TimeUnit.SECONDS);
+        builder.writeTimeout(120, TimeUnit.SECONDS);
+        builder.readTimeout(120, TimeUnit.SECONDS);
+
+        // don't allow redirects, because it would break PROPFIND handling
+        builder.followRedirects(false);
 
         // add User-Agent to every request
-        networkInterceptors().add(userAgentInterceptor);
+        builder.addNetworkInterceptor(userAgentInterceptor);
 
         // add cookie store for non-persistent cookies (some services like Horde use cookies for session tracking)
-        CookieManager cookies = new CookieManager();
-        setCookieHandler(cookies);
+        builder.cookieJar(MemoryCookieStore.INSTANCE);
 
-        // enable verbose logs, if requested
-        if (this.log.isTraceEnabled()) {
-            HttpLoggingInterceptor logger = new HttpLoggingInterceptor(new HttpLoggingInterceptor.Logger() {
+        // add network logging, if requested
+        if (logger.isLoggable(Level.FINEST)) {
+            HttpLoggingInterceptor loggingInterceptor = new HttpLoggingInterceptor(new HttpLoggingInterceptor.Logger() {
                 @Override
                 public void log(String message) {
-                    BufferedReader reader = new BufferedReader(new StringReader(message));
-                    String line;
-                    try {
-                        while ((line = reader.readLine()) != null) {
-                            int len = line.length();
-                            for (int pos = 0; pos < len; pos += MAX_LOG_LINE_LENGTH)
-                                if (pos < len - MAX_LOG_LINE_LENGTH)
-                                    HttpClient.this.log.trace(line.substring(pos, pos + MAX_LOG_LINE_LENGTH) + "\\");
-                                else
-                                    HttpClient.this.log.trace(line.substring(pos));
-                        }
-                    } catch(IOException e) {
-                        // for some reason, we couldn't split our message
-                        HttpClient.this.log.trace(message);
-                    }
+                    logger.finest(message);
                 }
             });
-            logger.setLevel(HttpLoggingInterceptor.Level.BODY);
-            interceptors().add(logger);
+            loggingInterceptor.setLevel(HttpLoggingInterceptor.Level.BODY);
+            builder.addInterceptor(loggingInterceptor);
         }
+
+        return builder;
     }
 
-    public HttpClient(Logger log, Context context, String username, String password, boolean preemptive) {
-        this(log, context);
-
-        // authentication
-        this.username = username;
-        this.password = password;
+    private static OkHttpClient.Builder addAuthentication(@NonNull OkHttpClient.Builder builder, @NonNull String username, @NonNull String password, boolean preemptive) {
         if (preemptive)
-            networkInterceptors().add(new PreemptiveAuthenticationInterceptor(username, password));
+            builder.addNetworkInterceptor(new PreemptiveAuthenticationInterceptor(username, password));
         else
-            setAuthenticator(new BasicDigestAuthenticator(null, username, password));
+            builder.authenticator(new BasicDigestAuthenticator(null, username, password));
+        return builder;
     }
 
-    /**
-     * Creates a new HttpClient (based on another one) which can be used to download external resources:
-     * 1. it does not use preemptive authentication
-     * 2. it only authenticates against a given host
-     * @param client  user name and password from this client will be used
-     * @param host    authentication will be restricted to this host
-     */
-    public HttpClient(Logger log, HttpClient client, String host) {
-        this(log, client.context);
-
-        username = client.username;
-        password = client.password;
-        setAuthenticator(new BasicDigestAuthenticator(host, username, password));
+    public static OkHttpClient addAuthentication(@NonNull OkHttpClient client, @NonNull String username, @NonNull String password, boolean preemptive) {
+        OkHttpClient.Builder builder = client.newBuilder();
+        addAuthentication(builder, username, password, preemptive);
+        return builder.build();
     }
 
-    // for testing (mock server doesn't need auth)
-    public HttpClient() {
-        this(null, null, null, null, false);
+    public static OkHttpClient addAuthentication(@NonNull OkHttpClient client, @NonNull String host, @NonNull String username, @NonNull String password) {
+        return client.newBuilder()
+                .authenticator(new BasicDigestAuthenticator(host, username, password))
+                .build();
     }
 
 
     static class UserAgentInterceptor implements Interceptor {
         @Override
         public Response intercept(Chain chain) throws IOException {
+            Locale locale = Locale.getDefault();
             Request request = chain.request().newBuilder()
                     .header("User-Agent", userAgent)
+                    .header("Accept-Language", locale.getLanguage() + "-" + locale.getCountry() + ", " + locale.getLanguage() + ";q=0.7, *;q=0.5")
                     .build();
             return chain.proceed(request);
         }
@@ -150,6 +146,7 @@ public class HttpClient extends OkHttpClient {
 
         @Override
         public Response intercept(Chain chain) throws IOException {
+            App.log.fine("Adding basic authorization header for user " + username);
             Request request = chain.request().newBuilder()
                     .header("Authorization", Credentials.basic(username, password))
                     .build();

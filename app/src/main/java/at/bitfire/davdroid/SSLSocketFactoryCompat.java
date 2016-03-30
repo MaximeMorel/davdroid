@@ -9,6 +9,7 @@
 package at.bitfire.davdroid;
 
 import android.os.Build;
+import android.support.annotation.NonNull;
 import android.text.TextUtils;
 
 import java.io.IOException;
@@ -32,7 +33,7 @@ import lombok.Cleanup;
 
 public class SSLSocketFactoryCompat extends SSLSocketFactory {
 
-    private SSLSocketFactory defaultFactory;
+    private SSLSocketFactory delegate;
 
     // Android 5.0+ (API level21) provides reasonable default settings
     // but it still allows SSLv3
@@ -49,7 +50,7 @@ public class SSLSocketFactoryCompat extends SSLSocketFactory {
                 for (String protocol : socket.getSupportedProtocols())
                     if (!protocol.toUpperCase(Locale.US).contains("SSL"))
                         protocols.add(protocol);
-                Constants.log.debug("Setting allowed TLS protocols: " + TextUtils.join(", ", protocols));
+                App.log.info("Setting allowed TLS protocols: " + TextUtils.join(", ", protocols));
                 SSLSocketFactoryCompat.protocols = protocols.toArray(new String[protocols.size()]);
 
                 /* set up reasonable cipher suites */
@@ -63,7 +64,7 @@ public class SSLSocketFactoryCompat extends SSLSocketFactory {
                             "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
                             "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
                             "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256",
-                            "TLS_ECHDE_RSA_WITH_AES_128_GCM_SHA256",
+                            "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
                             // maximum interoperability
                             "TLS_RSA_WITH_3DES_EDE_CBC_SHA",
                             "TLS_RSA_WITH_AES_128_CBC_SHA",
@@ -74,8 +75,8 @@ public class SSLSocketFactoryCompat extends SSLSocketFactory {
                             "TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA",
                             "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA");
                     List<String> availableCiphers = Arrays.asList(socket.getSupportedCipherSuites());
-                    Constants.log.debug("Available cipher suites: " + TextUtils.join(", ", availableCiphers));
-                    Constants.log.debug("Cipher suites enabled by default: " + TextUtils.join(", ", socket.getEnabledCipherSuites()));
+                    App.log.fine("Available cipher suites: " + TextUtils.join(", ", availableCiphers));
+                    App.log.fine("Cipher suites enabled by default: " + TextUtils.join(", ", socket.getEnabledCipherSuites()));
 
                     // take all allowed ciphers that are available and put them into preferredCiphers
                     HashSet<String> preferredCiphers = new HashSet<>(allowedCiphers);
@@ -90,35 +91,31 @@ public class SSLSocketFactoryCompat extends SSLSocketFactory {
                     HashSet<String> enabledCiphers = preferredCiphers;
                     enabledCiphers.addAll(new HashSet<>(Arrays.asList(socket.getEnabledCipherSuites())));
 
-                    Constants.log.debug("Enabling (only) those TLS ciphers: " + TextUtils.join(", ", enabledCiphers));
+                    App.log.info("Enabling (only) those TLS ciphers: " + TextUtils.join(", ", enabledCiphers));
                     SSLSocketFactoryCompat.cipherSuites = enabledCiphers.toArray(new String[enabledCiphers.size()]);
                 }
             }
         } catch (IOException e) {
-            Constants.log.error("Couldn't determine default TLS settings");
+            App.log.severe("Couldn't determine default TLS settings");
         }
     }
 
-    public SSLSocketFactoryCompat(MemorizingTrustManager mtm) {
+    public SSLSocketFactoryCompat(@NonNull MemorizingTrustManager mtm) {
         try {
             SSLContext sslContext = SSLContext.getInstance("TLS");
-            sslContext.init(null, (mtm != null) ? new X509TrustManager[] { mtm } : null, null);
-            defaultFactory = sslContext.getSocketFactory();
+            sslContext.init(null, new X509TrustManager[] { mtm }, null);
+            delegate = sslContext.getSocketFactory();
         } catch (GeneralSecurityException e) {
             throw new AssertionError(); // The system has no TLS. Just give up.
         }
     }
 
     private void upgradeTLS(SSLSocket ssl) {
-        if (protocols != null) {
-            Constants.log.debug("Setting allowed TLS protocols: " + TextUtils.join(", ", protocols));
+        if (protocols != null)
             ssl.setEnabledProtocols(protocols);
-        }
 
-        if (Build.VERSION.SDK_INT < 20 && cipherSuites != null) {
-            Constants.log.debug("Setting allowed TLS ciphers: " + TextUtils.join(", ", cipherSuites));
+        if (cipherSuites != null)
             ssl.setEnabledCipherSuites(cipherSuites);
-        }
     }
 
 
@@ -134,23 +131,23 @@ public class SSLSocketFactoryCompat extends SSLSocketFactory {
 
     @Override
     public Socket createSocket(Socket s, String host, int port, boolean autoClose) throws IOException {
-        Socket ssl = defaultFactory.createSocket(s, host, port, autoClose);
+        Socket ssl = delegate.createSocket(s, host, port, autoClose);
         if (ssl instanceof SSLSocket)
             upgradeTLS((SSLSocket)ssl);
         return ssl;
     }
 
     @Override
-    public Socket createSocket(String host, int port) throws IOException, UnknownHostException {
-        Socket ssl = defaultFactory.createSocket(host, port);
+    public Socket createSocket(String host, int port) throws IOException {
+        Socket ssl = delegate.createSocket(host, port);
         if (ssl instanceof SSLSocket)
             upgradeTLS((SSLSocket)ssl);
         return ssl;
     }
 
     @Override
-    public Socket createSocket(String host, int port, InetAddress localHost, int localPort) throws IOException, UnknownHostException {
-        Socket ssl = defaultFactory.createSocket(host, port, localHost, localPort);
+    public Socket createSocket(String host, int port, InetAddress localHost, int localPort) throws IOException {
+        Socket ssl = delegate.createSocket(host, port, localHost, localPort);
         if (ssl instanceof SSLSocket)
             upgradeTLS((SSLSocket)ssl);
         return ssl;
@@ -158,7 +155,7 @@ public class SSLSocketFactoryCompat extends SSLSocketFactory {
 
     @Override
     public Socket createSocket(InetAddress host, int port) throws IOException {
-        Socket ssl = defaultFactory.createSocket(host, port);
+        Socket ssl = delegate.createSocket(host, port);
         if (ssl instanceof SSLSocket)
             upgradeTLS((SSLSocket)ssl);
         return ssl;
@@ -166,7 +163,7 @@ public class SSLSocketFactoryCompat extends SSLSocketFactory {
 
     @Override
     public Socket createSocket(InetAddress address, int port, InetAddress localAddress, int localPort) throws IOException {
-        Socket ssl = defaultFactory.createSocket(address, port, localAddress, localPort);
+        Socket ssl = delegate.createSocket(address, port, localAddress, localPort);
         if (ssl instanceof SSLSocket)
             upgradeTLS((SSLSocket)ssl);
         return ssl;

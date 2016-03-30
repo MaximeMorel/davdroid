@@ -11,57 +11,125 @@ import android.accounts.Account;
 import android.app.Service;
 import android.content.AbstractThreadedSyncAdapter;
 import android.content.ContentProviderClient;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SyncResult;
+import android.database.Cursor;
+import android.database.DatabaseUtils;
+import android.database.sqlite.SQLiteDatabase;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.provider.CalendarContract;
+import android.support.annotation.NonNull;
+import android.support.annotation.Nullable;
 
-import at.bitfire.davdroid.Constants;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.logging.Level;
+
+import at.bitfire.davdroid.App;
+import at.bitfire.davdroid.InvalidAccountException;
+import at.bitfire.davdroid.model.CollectionInfo;
+import at.bitfire.davdroid.model.ServiceDB.Collections;
+import at.bitfire.davdroid.model.ServiceDB.OpenHelper;
+import at.bitfire.davdroid.model.ServiceDB.Services;
 import at.bitfire.davdroid.resource.LocalCalendar;
 import at.bitfire.ical4android.CalendarStorageException;
+import lombok.Cleanup;
 
-public class CalendarsSyncAdapterService extends Service {
-	private static SyncAdapter syncAdapter;
+public class CalendarsSyncAdapterService extends SyncAdapterService {
 
-	@Override
-	public void onCreate() {
-		if (syncAdapter == null)
-			syncAdapter = new SyncAdapter(getApplicationContext());
-	}
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        syncAdapter = new SyncAdapter(this, dbHelper);
+    }
 
-	@Override
-	public void onDestroy() {
-		syncAdapter = null;
-	}
 
-	@Override
-	public IBinder onBind(Intent intent) {
-		return syncAdapter.getSyncAdapterBinder(); 
-	}
-	
+	private static class SyncAdapter extends SyncAdapterService.SyncAdapter {
 
-	private static class SyncAdapter extends AbstractThreadedSyncAdapter {
-        public SyncAdapter(Context context) {
-            super(context, false);
+        public SyncAdapter(Context context, OpenHelper dbHelper) {
+            super(context, dbHelper);
         }
 
         @Override
         public void onPerformSync(Account account, Bundle extras, String authority, ContentProviderClient provider, SyncResult syncResult) {
-            Constants.log.info("Starting calendar sync (" + authority + ")");
+            super.onPerformSync(account, extras, authority, provider, syncResult);
 
             try {
+                updateLocalCalendars(provider, account);
+
                 for (LocalCalendar calendar : (LocalCalendar[])LocalCalendar.find(account, provider, LocalCalendar.Factory.INSTANCE, CalendarContract.Calendars.SYNC_EVENTS + "!=0", null)) {
-                    Constants.log.info("Synchronizing calendar #"  + calendar.getId() + ", URL: " + calendar.getName());
+                    App.log.info("Synchronizing calendar #"  + calendar.getId() + ", URL: " + calendar.getName());
                     CalendarSyncManager syncManager = new CalendarSyncManager(getContext(), account, extras, authority, syncResult, calendar);
                     syncManager.performSync();
                 }
             } catch (CalendarStorageException e) {
-                Constants.log.error("Couldn't enumerate local calendars", e);
+                App.log.log(Level.SEVERE, "Couldn't enumerate local calendars", e);
+                syncResult.databaseError = true;
+            } catch (InvalidAccountException e) {
+                App.log.log(Level.SEVERE, "Couldn't get account settings", e);
             }
 
-            Constants.log.info("Calendar sync complete");
+            App.log.info("Calendar sync complete");
+        }
+
+        private void updateLocalCalendars(ContentProviderClient provider, Account account) throws CalendarStorageException {
+            // enumerate remote and local calendars
+            Long service = getService(account);
+            Map<String, CollectionInfo> remote = remoteCalendars(service);
+            LocalCalendar[] local = (LocalCalendar[])LocalCalendar.find(account, provider, LocalCalendar.Factory.INSTANCE, null, null);
+
+            // delete obsolete local calendar
+            for (LocalCalendar calendar : local) {
+                String url = calendar.getName();
+                if (!remote.containsKey(url)) {
+                    App.log.fine("Deleting obsolete local calendar " + url);
+                    calendar.delete();
+                } else {
+                    // remote CollectionInfo found for this local collection, update data
+                    CollectionInfo info = remote.get(url);
+                    App.log.fine("Updating local calendar " + url + " with " + info);
+                    calendar.update(info);
+                    // we already have a local calendar for this remote collection, don't take into consideration anymore
+                    remote.remove(url);
+                }
+            }
+
+            // create new local calendars
+            for (String url : remote.keySet()) {
+                CollectionInfo info = remote.get(url);
+                App.log.info("Adding local calendar list " + info);
+                LocalCalendar.create(account, provider, info);
+            }
+        }
+
+        @Nullable
+        Long getService(Account account) {
+            @Cleanup Cursor c = db.query(Services._TABLE, new String[] { Services.ID },
+                    Services.ACCOUNT_NAME + "=? AND " + Services.SERVICE + "=?", new String[] { account.name, Services.SERVICE_CALDAV }, null, null, null);
+            if (c.moveToNext())
+                return c.getLong(0);
+            else
+                return null;
+        }
+
+        @NonNull
+        private Map<String, CollectionInfo> remoteCalendars(Long service) {
+            Map<String, CollectionInfo> collections = new LinkedHashMap<>();
+            if (service != null) {
+                @Cleanup Cursor cursor = db.query(Collections._TABLE, null,
+                        Collections.SERVICE_ID + "=? AND " + Collections.SUPPORTS_VEVENT + "!=0 AND " + Collections.SYNC,
+                        new String[] { String.valueOf(service) }, null, null, null);
+                while (cursor.moveToNext()) {
+                    ContentValues values = new ContentValues();
+                    DatabaseUtils.cursorRowToContentValues(cursor, values);
+                    CollectionInfo info = CollectionInfo.fromDB(values);
+                    collections.put(info.url, info);
+                }
+            }
+            return collections;
         }
     }
 

@@ -1,193 +1,180 @@
 /*
- * Copyright © 2013 – 2015 Ricki Hirner (bitfire web engineering).
+ * Copyright © 2013 – 2016 Ricki Hirner (bitfire web engineering).
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the GNU Public License v3.0
  * which accompanies this distribution, and is available at
  * http://www.gnu.org/licenses/gpl.html
  */
+
 package at.bitfire.davdroid.ui.setup;
 
 import android.accounts.Account;
 import android.accounts.AccountManager;
-import android.app.Fragment;
-import android.content.ContentProviderClient;
 import android.content.ContentResolver;
 import android.content.ContentValues;
+import android.content.Intent;
+import android.database.sqlite.SQLiteDatabase;
 import android.os.Bundle;
 import android.provider.CalendarContract;
 import android.provider.ContactsContract;
-import android.text.Editable;
-import android.text.TextWatcher;
-import android.util.Log;
+import android.support.design.widget.Snackbar;
+import android.support.v4.app.Fragment;
 import android.view.LayoutInflater;
-import android.view.Menu;
-import android.view.MenuInflater;
-import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.Button;
 import android.widget.EditText;
-import android.widget.TextView;
-import android.widget.Toast;
 
+import java.net.URI;
+import java.util.logging.Level;
+
+import at.bitfire.davdroid.AccountSettings;
+import at.bitfire.davdroid.App;
 import at.bitfire.davdroid.Constants;
+import at.bitfire.davdroid.DavService;
 import at.bitfire.davdroid.R;
-import at.bitfire.davdroid.resource.LocalAddressBook;
-import at.bitfire.davdroid.resource.LocalCalendar;
+import at.bitfire.davdroid.model.CollectionInfo;
+import at.bitfire.davdroid.model.ServiceDB.Collections;
+import at.bitfire.davdroid.model.ServiceDB.HomeSets;
+import at.bitfire.davdroid.model.ServiceDB.OpenHelper;
+import at.bitfire.davdroid.model.ServiceDB.Services;
 import at.bitfire.davdroid.resource.LocalTaskList;
-import at.bitfire.davdroid.resource.ServerInfo;
-import at.bitfire.davdroid.syncadapter.AccountSettings;
-import at.bitfire.ical4android.CalendarStorageException;
 import at.bitfire.ical4android.TaskProvider;
-import at.bitfire.vcard4android.ContactsStorageException;
 import lombok.Cleanup;
 
-public class AccountDetailsFragment extends Fragment implements TextWatcher {
-	public static final String TAG = "davdroid.AccountDetails";
+public class AccountDetailsFragment extends Fragment {
 
-	ServerInfo serverInfo;
-	
-	EditText editAccountName;
-	
-	
-	@Override
-	public View onCreateView(LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
-		View v = inflater.inflate(R.layout.setup_account_details, container, false);
-		
-		serverInfo = ((AddAccountActivity)getActivity()).serverInfo;
-		
-		editAccountName = (EditText)v.findViewById(R.id.account_name);
-		editAccountName.addTextChangedListener(this);
-		editAccountName.setText(serverInfo.getUserName());
-		
-		TextView textAccountNameInfo = (TextView)v.findViewById(R.id.account_name_info);
-		if (!serverInfo.hasEnabledCalendars())
-			textAccountNameInfo.setVisibility(View.GONE);
-	
-		setHasOptionsMenu(true);
-		return v;
-	}
-	
-	
-	@Override
-	public void onCreateOptionsMenu(Menu menu, MenuInflater inflater) {
-	    inflater.inflate(R.menu.setup_account_details, menu);
-	}
-	
-	@Override
-	public boolean onOptionsItemSelected(MenuItem item) {
-		switch (item.getItemId()) {
-		case R.id.add_account:
-			addAccount();
-			break;
-		default:
-			return false;
-		}
-		return true;
-	}
+    private static final String KEY_CONFIG = "config";
 
+    public static AccountDetailsFragment newInstance(DavResourceFinder.Configuration config) {
+        AccountDetailsFragment frag = new AccountDetailsFragment();
+        Bundle args = new Bundle(1);
+        args.putSerializable(KEY_CONFIG, config);
+        frag.setArguments(args);
+        return frag;
+    }
 
-	// actions
+    @Override
+    public View onCreateView(LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
+        final View v = inflater.inflate(R.layout.login_account_details, container, false);
 
-    @SuppressWarnings("Recycle")
-	void addAccount() {
-		String accountName = editAccountName.getText().toString();
-		
-		AccountManager accountManager = AccountManager.get(getActivity());
-		Account account = new Account(accountName, Constants.ACCOUNT_TYPE);
-		Bundle userData = AccountSettings.createBundle(serverInfo);
+        Button btnBack = (Button)v.findViewById(R.id.back);
+        btnBack.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                getFragmentManager().popBackStack();
+            }
+        });
 
-		if (accountManager.addAccountExplicitly(account, serverInfo.getPassword(), userData)) {
-			addSync(account, ContactsContract.AUTHORITY, serverInfo.getAddressBooks(), new AddSyncCallback() {
-                @Override
-                public void createLocalCollection(Account account, ServerInfo.ResourceInfo resource) throws ContactsStorageException {
-                    @Cleanup("release") ContentProviderClient provider = getActivity().getContentResolver().acquireContentProviderClient(ContactsContract.AUTHORITY);
-                    if (provider != null) {
-                        LocalAddressBook addressBook = new LocalAddressBook(account, provider);
+        DavResourceFinder.Configuration config = (DavResourceFinder.Configuration)getArguments().getSerializable(KEY_CONFIG);
 
-                        // set URL
-                        addressBook.setURL(resource.getUrl());
+        final EditText editName = (EditText)v.findViewById(R.id.account_name);
+        editName.setText(config.userName);
 
-                        // set Settings
-                        ContentValues settings = new ContentValues(2);
-                        settings.put(ContactsContract.Settings.SHOULD_SYNC, 1);
-                        settings.put(ContactsContract.Settings.UNGROUPED_VISIBLE, 1);
-                        addressBook.updateSettings(settings);
-                    } else
-                        Constants.log.error("Couldn't access Contacts Provider");
+        Button btnCreate = (Button)v.findViewById(R.id.create_account);
+        btnCreate.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                String name = editName.getText().toString();
+                if (name.isEmpty())
+                    editName.setError(getString(R.string.login_account_name_required));
+                else {
+                    if (createAccount(name, (DavResourceFinder.Configuration)getArguments().getSerializable(KEY_CONFIG)))
+                        getActivity().finish();
+                    else
+                        Snackbar.make(v, R.string.login_account_not_created, Snackbar.LENGTH_LONG).show();
                 }
-            });
+            }
+        });
 
-			addSync(account, CalendarContract.AUTHORITY, serverInfo.getCalendars(), new AddSyncCallback() {
-				@Override
-				public void createLocalCollection(Account account, ServerInfo.ResourceInfo calendar) {
-                    try {
-                        LocalCalendar.create(account, getActivity().getContentResolver(), calendar);
-                    } catch(CalendarStorageException e) {
-                        Constants.log.error("Couldn't create local calendar", e);
-                    }
-				}
-			});
+        return v;
+    }
 
-			addSync(account, TaskProvider.ProviderName.OpenTasks.authority, serverInfo.getTaskLists(), new AddSyncCallback() {
-				@Override
-				public void createLocalCollection(Account account, ServerInfo.ResourceInfo todoList) {
-                    try {
-                        LocalTaskList.create(account, getActivity().getContentResolver(), todoList);
-                    } catch (CalendarStorageException e) {
-                        Constants.log.error("Couldn't create local task list", e);
-                    }
-                }
-			});
+    protected boolean createAccount(String accountName, DavResourceFinder.Configuration config) {
+        Account account = new Account(accountName, Constants.ACCOUNT_TYPE);
 
-			getActivity().finish();				
-		} else
-			Toast.makeText(getActivity(), "Couldn't create account (account with this name already existing?)", Toast.LENGTH_LONG).show();
-	}
+        // create Android account
+        Bundle userData = AccountSettings.initialUserData(config.userName, config.preemptive);
+        App.log.log(Level.INFO, "Creating Android account with initial config", new Object[] { account, userData });
 
-	protected interface AddSyncCallback {
-		void createLocalCollection(Account account, ServerInfo.ResourceInfo resource) throws ContactsStorageException;
-	}
+        AccountManager accountManager = AccountManager.get(getContext());
+        if (!accountManager.addAccountExplicitly(account, config.password, userData))
+            return false;
 
-	protected void addSync(Account account, String authority, ServerInfo.ResourceInfo[] resourceList, AddSyncCallback callback) {
-		boolean sync = false;
-		for (ServerInfo.ResourceInfo resource : resourceList)
-			if (resource.isEnabled()) {
-				sync = true;
-				if (callback != null)
-					try {
-						callback.createLocalCollection(account, resource);
-					} catch(ContactsStorageException e) {
-						Log.e(TAG, "Couldn't add sync collection", e);
-						Toast.makeText(getActivity(), "Couldn't set up synchronization for " + authority, Toast.LENGTH_LONG).show();
-					}
-			}
-		if (sync) {
-			ContentResolver.setIsSyncable(account, authority, 1);
-			ContentResolver.setSyncAutomatically(account, authority, true);
-		} else
-			ContentResolver.setIsSyncable(account, authority, 0);
-	}
+        // add entries for account to service DB
+        App.log.log(Level.INFO, "Writing account configuration to database", config);
+        @Cleanup OpenHelper dbHelper = new OpenHelper(getContext());
+        SQLiteDatabase db = dbHelper.getWritableDatabase();
+        db.beginTransactionNonExclusive();
+        try {
+            Intent refreshIntent = new Intent(getActivity(), DavService.class);
+            refreshIntent.setAction(DavService.ACTION_REFRESH_COLLECTIONS);
 
+            if (config.cardDAV != null) {
+                long id = insertService(db, accountName, Services.SERVICE_CARDDAV, config.cardDAV);
+                refreshIntent.putExtra(DavService.EXTRA_DAV_SERVICE_ID, id);
+                getActivity().startService(refreshIntent);
 
-	// input validation
-	
-	@Override
-	public void onPrepareOptionsMenu(Menu menu) {
-		boolean ok = editAccountName.getText().length() > 0;
-		MenuItem item = menu.findItem(R.id.add_account);
-		item.setEnabled(ok);
-	}
+                ContentResolver.setIsSyncable(account, ContactsContract.AUTHORITY, 1);
+                ContentResolver.setSyncAutomatically(account, ContactsContract.AUTHORITY, true);
+            } else
+                ContentResolver.setIsSyncable(account, ContactsContract.AUTHORITY, 0);
 
-	@Override
-	public void beforeTextChanged(CharSequence s, int start, int count, int after) {
-	}
+            if (config.calDAV != null) {
+                long id = insertService(db, accountName, Services.SERVICE_CALDAV, config.calDAV);
+                refreshIntent.putExtra(DavService.EXTRA_DAV_SERVICE_ID, id);
+                getActivity().startService(refreshIntent);
 
-	@Override
-	public void onTextChanged(CharSequence s, int start, int before, int count) {
-		getActivity().invalidateOptionsMenu();
-	}
+                ContentResolver.setIsSyncable(account, CalendarContract.AUTHORITY, 1);
+                ContentResolver.setSyncAutomatically(account, CalendarContract.AUTHORITY, true);
 
-	@Override
-	public void afterTextChanged(Editable s) {
-	}
+                if (LocalTaskList.tasksProviderAvailable(getContext().getContentResolver())) {
+                    // will only do something if OpenTasks is installed and accessible
+                    ContentResolver.setIsSyncable(account, TaskProvider.ProviderName.OpenTasks.authority, 1);
+                    ContentResolver.setSyncAutomatically(account, TaskProvider.ProviderName.OpenTasks.authority, true);
+                } else
+                    // If OpenTasks is installed after DAVdroid, DAVdroid won't get task permissions and crash at every task sync
+                    // unless we disable task sync here (before OpenTasks is available).
+                    ContentResolver.setIsSyncable(account, TaskProvider.ProviderName.OpenTasks.authority, 0);
+            } else {
+                ContentResolver.setIsSyncable(account, CalendarContract.AUTHORITY, 0);
+                ContentResolver.setIsSyncable(account, TaskProvider.ProviderName.OpenTasks.authority, 0);
+            }
+
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
+
+        return true;
+    }
+
+    protected long insertService(SQLiteDatabase db, String accountName, String service, DavResourceFinder.Configuration.ServiceInfo info) {
+        ContentValues values = new ContentValues();
+
+        // insert service
+        values.put(Services.ACCOUNT_NAME, accountName);
+        values.put(Services.SERVICE, service);
+        if (info.principal != null)
+            values.put(Services.PRINCIPAL, info.principal.toString());
+        long serviceID = db.insertOrThrow(Services._TABLE, null, values);
+
+        // insert home sets
+        for (URI homeSet : info.homeSets) {
+            values.clear();
+            values.put(HomeSets.SERVICE_ID, serviceID);
+            values.put(HomeSets.URL, homeSet.toString());
+            db.insertOrThrow(HomeSets._TABLE, null, values);
+        }
+
+        // insert collections
+        for (CollectionInfo collection : info.collections.values()) {
+            values = collection.toDB();
+            values.put(Collections.SERVICE_ID, serviceID);
+            db.insertOrThrow(Collections._TABLE, null, values);
+        }
+
+        return serviceID;
+    }
+
 }

@@ -10,7 +10,6 @@ package at.bitfire.davdroid.ui;
 
 import android.accounts.Account;
 import android.accounts.AccountManager;
-import android.app.Activity;
 import android.app.LoaderManager;
 import android.content.AsyncTaskLoader;
 import android.content.ContentResolver;
@@ -18,12 +17,19 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.Loader;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
+import android.database.DatabaseUtils;
+import android.database.sqlite.SQLiteDatabase;
+import android.database.sqlite.SQLiteException;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.CalendarContract;
 import android.provider.ContactsContract;
+import android.support.v4.database.DatabaseUtilsCompat;
+import android.support.v7.app.AppCompatActivity;
 import android.text.TextUtils;
+import android.util.Log;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.widget.TextView;
@@ -35,14 +41,19 @@ import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.util.Date;
+import java.util.logging.Level;
 
 import at.bitfire.dav4android.exception.HttpException;
+import at.bitfire.davdroid.AccountSettings;
+import at.bitfire.davdroid.App;
 import at.bitfire.davdroid.BuildConfig;
 import at.bitfire.davdroid.Constants;
+import at.bitfire.davdroid.InvalidAccountException;
 import at.bitfire.davdroid.R;
-import at.bitfire.davdroid.syncadapter.AccountSettings;
+import at.bitfire.davdroid.model.ServiceDB;
+import lombok.Cleanup;
 
-public class DebugInfoActivity extends Activity implements LoaderManager.LoaderCallbacks<String> {
+public class DebugInfoActivity extends AppCompatActivity implements LoaderManager.LoaderCallbacks<String> {
     public static final String
             KEY_EXCEPTION = "exception",
             KEY_LOGS = "logs",
@@ -55,11 +66,13 @@ public class DebugInfoActivity extends Activity implements LoaderManager.LoaderC
     TextView tvReport;
     String report;
 
+    File reportFile;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        setContentView(R.layout.debug_info_activity);
+        setContentView(R.layout.activity_debug_info);
         tvReport = (TextView)findViewById(R.id.text_report);
 
         getLoaderManager().initLoader(0, getIntent().getExtras(), this);
@@ -67,7 +80,7 @@ public class DebugInfoActivity extends Activity implements LoaderManager.LoaderC
 
     @Override
     public boolean onCreateOptionsMenu(Menu menu) {
-        getMenuInflater().inflate(R.menu.exception_details_activity, menu);
+        getMenuInflater().inflate(R.menu.activity_debug_info, menu);
         return true;
     }
 
@@ -84,8 +97,8 @@ public class DebugInfoActivity extends Activity implements LoaderManager.LoaderC
             if (report.length() > MAX_INLINE_REPORT_LENGTH)
                 // report is too long for inline text, send it as an attachment
                 try {
-                    File reportFile = File.createTempFile("davdroid-debug", ".txt", getExternalCacheDir());
-                    Constants.log.debug("Writing debug info to " + reportFile.getAbsolutePath());
+                    reportFile = File.createTempFile("davdroid-debug", ".txt", getExternalCacheDir());
+                    App.log.fine("Writing debug info to " + reportFile.getAbsolutePath());
                     FileWriter writer = new FileWriter(reportFile);
                     writer.write(report);
                     writer.close();
@@ -157,29 +170,26 @@ public class DebugInfoActivity extends Activity implements LoaderManager.LoaderC
             // begin with most specific information
 
             if (phase != -1)
-                report.append("SYNCHRONIZATION INFO\nSynchronization phase: " + phase + "\n");
+                report.append("SYNCHRONIZATION INFO\nSynchronization phase: ").append(phase).append("\n");
             if (account != null)
-                report.append("Account name: " + account.name + "\n");
+                report.append("Account name: ").append(account.name).append("\n");
             if (authority != null)
-                report.append("Authority: " + authority + "\n\n");
+                report.append("Authority: ").append(authority).append("\n");
 
             if (exception instanceof HttpException) {
                 HttpException http = (HttpException)exception;
                 if (http.request != null)
-                    report.append("HTTP REQUEST:\n" + http.request + "\n\n");
+                    report.append("\nHTTP REQUEST:\n").append(http.request).append("\n\n");
                 if (http.response != null)
-                    report.append("HTTP RESPONSE:\n" + http.response + "\n\n");
+                    report.append("HTTP RESPONSE:\n").append(http.response).append("\n");
             }
 
-            if (exception != null) {
-                report.append("STACK TRACE:\n");
-                for (String stackTrace : ExceptionUtils.getRootCauseStackTrace(exception))
-                    report.append(stackTrace + "\n");
-                report.append("\n");
-            }
+            if (exception != null)
+                report  .append("\nEXCEPTION:\n")
+                        .append(ExceptionUtils.getStackTrace(exception));
 
             if (logs != null)
-                report.append("LOGS:\n" + logs + "\n");
+                report.append("\nLOGS:\n").append(logs).append("\n");
 
             try {
                 PackageManager pm = getContext().getPackageManager();
@@ -189,41 +199,45 @@ public class DebugInfoActivity extends Activity implements LoaderManager.LoaderC
                 boolean workaroundInstalled = false;
                 try {
                     workaroundInstalled = pm.getPackageInfo("at.bitfire.davdroid.jbworkaround", 0) != null;
-                } catch(PackageManager.NameNotFoundException e) {}
-                report.append(
-                        "SOFTWARE INFORMATION\n" +
-                                "DAVdroid version: " + BuildConfig.VERSION_NAME + " (" + BuildConfig.VERSION_CODE + ") " + new Date(BuildConfig.buildTime) + "\n" +
-                                "Installed from: " + installedFrom + "\n" +
-                                "JB Workaround installed: " + (workaroundInstalled ? "yes" : "no") + "\n\n"
-                );
+                } catch(PackageManager.NameNotFoundException ignored) {}
+                report.append("\nSOFTWARE INFORMATION\n" +
+                                "DAVdroid version: ").append(BuildConfig.VERSION_NAME).append(" (").append(BuildConfig.VERSION_CODE).append(") ").append(new Date(BuildConfig.buildTime)).append("\n")
+                                .append("Installed from: ").append(installedFrom).append("\n")
+                                .append("JB Workaround installed: ").append(workaroundInstalled ? "yes" : "no").append("\n\n");
             } catch(Exception ex) {
-                Constants.log.error("Couldn't get software information", ex);
+                App.log.log(Level.SEVERE, "Couldn't get software information", ex);
             }
 
             report.append(
                     "CONFIGURATION\n" +
-                            "System-wide synchronization: " + (ContentResolver.getMasterSyncAutomatically() ? "automatically" : "manually") + "\n"
-            );
+                    "System-wide synchronization: ").append(ContentResolver.getMasterSyncAutomatically() ? "automatically" : "manually").append("\n");
             AccountManager accountManager = AccountManager.get(getContext());
-            for (Account acct : accountManager.getAccountsByType(Constants.ACCOUNT_TYPE)) {
-                AccountSettings settings = new AccountSettings(getContext(), acct);
-                report.append(
-                        "Account: " + acct.name + "\n" +
-                                "  Address book sync. interval: " + syncStatus(settings, ContactsContract.AUTHORITY) + "\n" +
-                                "  Calendar     sync. interval: " + syncStatus(settings, CalendarContract.AUTHORITY) + "\n" +
-                                "  OpenTasks    sync. interval: " + syncStatus(settings, "org.dmfs.tasks") + "\n"
-                        );
-            }
+            for (Account acct : accountManager.getAccountsByType(Constants.ACCOUNT_TYPE))
+                try {
+                    AccountSettings settings = new AccountSettings(getContext(), acct);
+                    report.append(
+                            "Account: ").append(acct.name).append("\n" +
+                                    "  Address book sync. interval: ").append(syncStatus(settings, ContactsContract.AUTHORITY)).append("\n" +
+                                    "  Calendar     sync. interval: ").append(syncStatus(settings, CalendarContract.AUTHORITY)).append("\n" +
+                                    "  OpenTasks    sync. interval: ").append(syncStatus(settings, "org.dmfs.tasks")).append("\n");
+                } catch(InvalidAccountException e) {
+                    report.append(acct).append(" is invalid (unsupported settings version) or does not exist\n");
+                }
+            report.append("\n");
+
+            report.append("SQLITE DUMP\n");
+            @Cleanup ServiceDB.OpenHelper dbHelper = new ServiceDB.OpenHelper(getContext());
+            dbHelper.dump(report);
             report.append("\n");
 
             try {
                 report.append(
                         "SYSTEM INFORMATION\n" +
-                                "Android version: " + Build.VERSION.RELEASE + " (" + Build.DISPLAY + ")\n" +
-                                "Device: " + WordUtils.capitalize(Build.MANUFACTURER) + " " + Build.MODEL + " (" + Build.DEVICE + ")\n\n"
+                                "Android version: ").append(Build.VERSION.RELEASE).append(" (").append(Build.DISPLAY).append(")\n" +
+                                "Device: ").append(WordUtils.capitalize(Build.MANUFACTURER)).append(" ").append(Build.MODEL).append(" (").append(Build.DEVICE).append(")\n\n"
                 );
             } catch (Exception ex) {
-                Constants.log.error("Couldn't get system details", ex);
+                App.log.log(Level.SEVERE, "Couldn't get system details", ex);
             }
 
             return report.toString();

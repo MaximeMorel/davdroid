@@ -14,18 +14,22 @@ import android.content.ContentValues;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.RemoteException;
+import android.support.annotation.NonNull;
+import android.text.TextUtils;
 
 import org.dmfs.provider.tasks.TaskContract.TaskLists;
 import org.dmfs.provider.tasks.TaskContract.Tasks;
 
 import java.io.FileNotFoundException;
 
+import at.bitfire.davdroid.DavUtils;
+import at.bitfire.davdroid.model.CollectionInfo;
 import at.bitfire.ical4android.AndroidTaskList;
 import at.bitfire.ical4android.AndroidTaskListFactory;
 import at.bitfire.ical4android.CalendarStorageException;
 import at.bitfire.ical4android.TaskProvider;
 import lombok.Cleanup;
-import lombok.NonNull;
+import okhttp3.HttpUrl;
 
 public class LocalTaskList extends AndroidTaskList implements LocalCollection {
 
@@ -53,20 +57,24 @@ public class LocalTaskList extends AndroidTaskList implements LocalCollection {
         super(account, provider, LocalTask.Factory.INSTANCE, id);
     }
 
-    public static Uri create(Account account, ContentResolver resolver, ServerInfo.ResourceInfo info) throws CalendarStorageException {
-        TaskProvider provider = TaskProvider.acquire(resolver, TaskProvider.ProviderName.OpenTasks);
-        if (provider == null)
-            throw new CalendarStorageException("Couldn't access OpenTasks provider");
-
-        ContentValues values = new ContentValues();
-        values.put(TaskLists._SYNC_ID, info.getUrl());
-        values.put(TaskLists.LIST_NAME, info.getTitle());
-        values.put(TaskLists.LIST_COLOR, info.color != null ? info.color : defaultColor);
+    public static Uri create(Account account, TaskProvider provider, CollectionInfo info) throws CalendarStorageException {
+        ContentValues values = valuesFromCollectionInfo(info);
         values.put(TaskLists.OWNER, account.name);
+        return create(account, provider, values);
+    }
+
+    public void update(CollectionInfo info) throws CalendarStorageException {
+        update(valuesFromCollectionInfo(info));
+    }
+
+    private static ContentValues valuesFromCollectionInfo(CollectionInfo info) {
+        ContentValues values = new ContentValues();
+        values.put(TaskLists._SYNC_ID, info.url);
+        values.put(TaskLists.LIST_NAME, !TextUtils.isEmpty(info.displayName) ? info.displayName : DavUtils.lastSegmentOfUrl(info.url));
+        values.put(TaskLists.LIST_COLOR, info.color != null ? info.color : defaultColor);
         values.put(TaskLists.SYNC_ENABLED, 1);
         values.put(TaskLists.VISIBLE, 1);
-
-        return create(account, provider, values);
+        return values;
     }
 
 
@@ -130,7 +138,7 @@ public class LocalTaskList extends AndroidTaskList implements LocalCollection {
         if (tasksProviderAvailable != null)
             return tasksProviderAvailable;
         else {
-            TaskProvider provider = TaskProvider.acquire(resolver, TaskProvider.ProviderName.OpenTasks);
+            @Cleanup TaskProvider provider = TaskProvider.acquire(resolver, TaskProvider.ProviderName.OpenTasks);
             return tasksProviderAvailable = (provider != null);
         }
     }

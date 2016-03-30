@@ -10,15 +10,15 @@ apply plugin: 'com.android.application'
 
 android {
     compileSdkVersion 23
-    buildToolsVersion '23.0.2'
+    buildToolsVersion "23.0.3"
 
     defaultConfig {
         applicationId "at.bitfire.davdroid"
         minSdkVersion 14
         targetSdkVersion 22
 
-        versionCode 87
-        versionName "0.9.1.3"
+        versionCode 93
+        versionName "1.0.3"
 
         buildConfigField "long", "buildTime", System.currentTimeMillis() + "L"
     }
@@ -32,15 +32,19 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.txt'
         }
     }
+
     lintOptions {
+        disable 'GoogleAppIndexingWarning'      // we don't need Google indexing, thanks
+        disable 'GradleDependency'
+        disable 'GradleDynamicVersion'
         disable 'IconColors'
         disable 'IconLauncherShape'
         disable 'IconMissingDensityFolder'
-        disable 'InconsistentLayout'
-        disable 'MergeRootFrame'
         disable 'MissingTranslation'
-        disable 'OldTargetApi'
+        disable 'OldTargetApi'      // Android 6 permission model not implemented yet
+        disable 'Recycle'           // doesn't understand Lombok's @Cleanup
         disable 'RtlEnabled'
+        disable 'RtlHardcoded'
         disable 'Typos'
     }
     packagingOptions {
@@ -55,16 +59,21 @@ configurations.all {
 }
 
 dependencies {
-    compile 'dnsjava:dnsjava:2.1.7'
-    compile 'org.apache.commons:commons-lang3:3.4'
     provided 'org.projectlombok:lombok:1.16.6'
-    compile 'org.slf4j:slf4j-android:1.7.13'
 
     compile project(':dav4android')
     compile project(':ical4android')
     compile project(':vcard4android')
 
+    compile 'com.android.support:appcompat-v7:23.+'
+    compile 'com.android.support:cardview-v7:23.+'
+    compile 'com.android.support:design:23.+'
+    compile 'com.android.support:preference-v7:23.+'
+
+    compile 'com.github.yukuku:ambilwarna:2.0.1'
     compile project(':MemorizingTrustManager')
 
-    androidTestCompile 'com.squareup.okhttp:mockwebserver:2.7.2'
+    androidTestCompile 'com.squareup.okhttp3:mockwebserver:3.2.0'
+    compile 'dnsjava:dnsjava:2.1.7'
+    compile 'org.apache.commons:commons-lang3:3.4'
 }
